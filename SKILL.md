@@ -12,19 +12,28 @@ allowed-tools: Bash(python3 *), Bash(~/.claude/skills/bitbucket/scripts/*)
 
 Lightweight Bitbucket CLI for Claude Code. Uses a Python script that calls Bitbucket Cloud REST API 2.0 directly and returns **compact output** to minimize token usage.
 
-When invoked with arguments (e.g. `/bitbucket create-pr 123`), run:
-
-```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py $ARGUMENTS
-```
+When invoked with arguments (e.g. `/bitbucket create-pr 123`), run the script
+from whichever location exists (see **Script Location** below) with `$ARGUMENTS`.
 
 ## Script Location
 
-```
-~/.claude/skills/bitbucket/bitbucket_api.py
-```
+The script may live in either of these places — **look in both and use the one
+that exists; if both exist, prefer the repo-attached copy**:
 
-Config: `~/.claude/bitbucket.config`
+1. Repo-attached (preferred): `<repo>/.claude/skills/bitbucket/bitbucket_api.py`
+2. Global: `~/.claude/skills/bitbucket/bitbucket_api.py`
+
+Invoke the resolved path, e.g. `python3 <resolved>/bitbucket_api.py <command> [args]`.
+
+## Config
+
+The config is resolved the same way — **look in both, prefer the repo-attached
+one if both exist**:
+
+1. Repo-attached (preferred): `bitbucket.config` next to the script (`<repo>/.claude/skills/bitbucket/bitbucket.config`)
+2. Global: `~/.claude/bitbucket.config`
+
+The script already applies this repo-first resolution automatically.
 
 ### Config Setup
 
@@ -137,6 +146,12 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py pipelines [COUNT]
 ```
 
 - COUNT: number of recent pipelines to show (default: 10)
+
+**Status interpretation** — the Status column is `STATE/RESULT-or-STAGE`:
+- `COMPLETED/SUCCESSFUL`, `COMPLETED/FAILED` — terminal results.
+- `IN_PROGRESS/PAUSED` (or `/HALTED`) — **not running**: the pipeline succeeded up to a manual trigger step and is waiting for a human. Its Duration is wall-clock since the pause, so do **not** report it as "stuck", "slow", or "still building". Read it as "built OK, awaiting manual trigger".
+- `IN_PROGRESS` with no stage — genuinely executing.
+- For per-step detail, query `/pipelines/{uuid}/steps/` and read each step's `state.name` / `state.result.name`.
 
 ## PR Title Format
 
