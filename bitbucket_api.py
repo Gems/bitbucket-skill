@@ -10,7 +10,16 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import base64
-CONFIG_PATH = os.path.expanduser("~/.claude/bitbucket.config")
+# Config is resolved repo-first: a bitbucket.config next to this script (the
+# repo-attached copy) wins over the global ~/.claude/bitbucket.config.
+CONFIG_PATHS = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "bitbucket.config"),
+    os.path.expanduser("~/.claude/bitbucket.config"),
+]
+
+
+def _config_path():
+    return next((p for p in CONFIG_PATHS if os.path.exists(p)), None)
 
 
 def _ssl_context():
@@ -28,9 +37,10 @@ SSL_CTX = _ssl_context()
 
 
 def load_config():
-    if not os.path.exists(CONFIG_PATH):
-        print(f"Error: Config not found at {CONFIG_PATH}", file=sys.stderr)
-        print("Create it with:", file=sys.stderr)
+    path = _config_path()
+    if not path:
+        print(f"Error: Config not found. Looked in: {', '.join(CONFIG_PATHS)}", file=sys.stderr)
+        print("Create one of them with:", file=sys.stderr)
         print(json.dumps({
             "username": "your_bitbucket_username",
             "app_password": "your_bitbucket_app_password",
@@ -40,7 +50,7 @@ def load_config():
         print("\nUses Bitbucket App Password with Basic Auth.", file=sys.stderr)
         print("Create: Bitbucket → Personal settings → App passwords", file=sys.stderr)
         sys.exit(1)
-    with open(CONFIG_PATH) as f:
+    with open(path) as f:
         return json.load(f)
 
 
@@ -268,9 +278,13 @@ def cmd_pipelines(config, count=10):
         uuid = p.get("uuid", "—")[:8]
         target = p.get("target", {})
         branch = target.get("ref_name", target.get("selector", {}).get("pattern", "—"))
-        state = p.get("state", {}).get("name", "—")
-        result = p.get("state", {}).get("result", {}).get("name", "")
-        status = f"{state}/{result}" if result else state
+        state_obj = p.get("state", {})
+        state = state_obj.get("name", "—")
+        result = state_obj.get("result", {}).get("name", "")
+        # IN_PROGRESS pipelines carry a stage (e.g. PAUSED/HALTED) when waiting
+        # on a manual trigger step — surface it so paused != actively running.
+        stage = state_obj.get("stage", {}).get("name", "")
+        status = f"{state}/{result or stage}" if (result or stage) else state
         duration = p.get("duration_in_seconds")
         dur_str = f"{duration // 60}m {duration % 60}s" if duration else "—"
         trigger = target.get("type", "—").replace("pipeline_ref_target", "push")
