@@ -2,8 +2,10 @@
 name: bitbucket
 description: >
   Interact with Bitbucket — create PRs, list PRs, view PR details, merge, decline, read comments, view pipelines,
-  code review with inline comments, manage environments and variables. Use when user says "/bitbucket pr",
-  "/bitbucket create-pr", "/bitbucket list-prs", "/bitbucket pipelines", or similar Bitbucket-related requests.
+  CI-gated merge (poll the PR pipeline and merge when green), code review with inline comments, manage environments
+  and variables. Use when user says "/bitbucket pr", "/bitbucket create-pr", "/bitbucket list-prs",
+  "/bitbucket pipelines", "/bitbucket merge-when-green", "/bitbucket ship", asks to open a PR and get it merged once
+  CI passes / merge when the pipeline is green, or similar Bitbucket-related requests.
 argument-hint: "[command] [args]"
 allowed-tools: Bash(python3 *), Bash(~/.claude/skills/bitbucket/scripts/*)
 ---
@@ -152,6 +154,35 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py pipelines [COUNT]
 - `IN_PROGRESS/PAUSED` (or `/HALTED`) — **not running**: the pipeline succeeded up to a manual trigger step and is waiting for a human. Its Duration is wall-clock since the pause, so do **not** report it as "stuck", "slow", or "still building". Read it as "built OK, awaiting manual trigger".
 - `IN_PROGRESS` with no stage — genuinely executing.
 - For per-step detail, query `/pipelines/{uuid}/steps/` and read each step's `state.name` / `state.result.name`.
+
+### Merge When Green (CI-gated merge)
+
+**Trigger**: `/bitbucket merge-when-green`, `/bitbucket ship`, or any phrasing that asks to open a PR and get it merged once CI passes — e.g. "let's open a PR and get it merged", "ship this", "merge it once the pipeline is green", "create the PR and merge when CI passes".
+
+This is **not** a single CLI call — it is an agent procedure that polls the PR's pipeline and merges only on success. Follow these steps in order:
+
+1. **Resolve the PR.**
+   - If a PR is named in the conversation (number/URL), use it.
+   - Otherwise, if an open PR already exists for the current branch (`list-prs OPEN`), use it.
+   - Otherwise create one with `create-pr` (destination = the branch's intended base, default the repo's main/default branch) — **unless the current branch _is_ the main/default branch**, in which case there is nothing to merge: stop and tell the user.
+
+2. **Identify the PR's pipeline run.** Run `pipelines`. The PR build is the most recent run with trigger `pipeline_pullrequest_target` (branch shown as `**`) created at/after the PR's head commit. Note its `STATE/RESULT` and `Created` time.
+
+3. **Derive a reference duration.** From the same `pipelines` list, take the most recent `COMPLETED/SUCCESSFUL` run with trigger `pipeline_pullrequest_target` and read its `Duration` (elapsed). That is the expected runtime. If there is no such prior PR run, fall back to ~10 min.
+
+4. **Deduce the wait.** `wait ≈ reference_duration − elapsed_since_pipeline_created` (use current time vs. the run's `Created`, accounting for any timezone offset between the API's UTC timestamps and local time). Clamp to a sensible minimum (~60s). Never wait the full reference duration if the run is already partway through.
+
+5. **Wait, then re-check.** Wait the deduced period (use `ScheduleWakeup`; the prompt for the wakeup should re-enter this procedure), then re-run `pipelines`:
+   - `COMPLETED/SUCCESSFUL` → go to step 6.
+   - `COMPLETED/FAILED` (or `ERROR`/`STOPPED`) → **stop, do not merge**, report the failure to the user.
+   - Still `IN_PROGRESS` → deduce a short follow-up wait (e.g. 1–2 min) and repeat this step.
+   - `IN_PROGRESS/PAUSED` or `/HALTED` → the build is done and waiting on a manual trigger step; treat the build as passed for merge purposes unless the manual step is the gate the user cares about — if unsure, ask.
+
+6. **Merge.** Once the run is `COMPLETED/SUCCESSFUL`, merge with `merge-pr <ID>`. Report the merge commit and that CI was green.
+
+Notes:
+- The merge is conditioned on observed green CI — keep the confirming `pipelines` output in the transcript so the success condition is verifiable at merge time.
+- Bitbucket API timestamps are UTC; convert when computing elapsed/wait against local `date`.
 
 ## PR Title Format
 
