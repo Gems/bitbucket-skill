@@ -4,3 +4,7 @@
 # Config files with credentials
 *.config
 bitbucket.config
+
+# Python bytecode
+__pycache__/
+*.py[cod]

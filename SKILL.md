@@ -7,7 +7,7 @@ description: >
   "/bitbucket pipelines", "/bitbucket merge-when-green", "/bitbucket ship", asks to open a PR and get it merged once
   CI passes / merge when the pipeline is green, or similar Bitbucket-related requests.
 argument-hint: "[command] [args]"
-allowed-tools: Bash(python3 *), Bash(~/.claude/skills/bitbucket/scripts/*)
+allowed-tools: Bash(python3 *), Bash(*.claude/skills/bitbucket/scripts/*), Bash(*.agents/skills/bitbucket/scripts/*), Bash(*.codex/skills/bitbucket/scripts/*)
 ---
 
 # Bitbucket Skill
@@ -19,21 +19,36 @@ from whichever location exists (see **Script Location** below) with `$ARGUMENTS`
 
 ## Script Location
 
-The script may live in either of these places — **look in both and use the one
-that exists; if both exist, prefer the repo-attached copy**:
+The script may live in any of these places — **look in all of them and use the
+one that exists; if multiple exist, prefer a repo-attached copy**:
 
-1. Repo-attached (preferred): `<repo>/.claude/skills/bitbucket/bitbucket_api.py`
-2. Global: `~/.claude/skills/bitbucket/bitbucket_api.py`
+1. Repo-attached (preferred): `<repo>/.claude/skills/bitbucket/bitbucket_api.py`,
+   `<repo>/.agents/skills/bitbucket/bitbucket_api.py`, or
+   `<repo>/.codex/skills/bitbucket/bitbucket_api.py`
+2. User-level: `~/.claude/skills/bitbucket/bitbucket_api.py`,
+   `~/.agents/skills/bitbucket/bitbucket_api.py`, or
+   `~/.codex/skills/bitbucket/bitbucket_api.py`
 
-Invoke the resolved path, e.g. `python3 <resolved>/bitbucket_api.py <command> [args]`.
+Set `BITBUCKET_SKILL` to the resolved `bitbucket` directory, then invoke
+`python3 "$BITBUCKET_SKILL/bitbucket_api.py" <command> [args]`.
+
+**Never `cd` into the script's directory before running it.** Workspace/repo
+auto-detection reads the git remote of the *current working directory* — and
+the repo-attached path above is commonly a symlink to this shared skill repo
+itself (a personal skill install shared across projects), which is an
+unrelated git repo. `cd`-ing there and then running the script resolves cwd
+through the symlink and detects the wrong repo (or none at all). Always keep
+cwd at the target project's root and invoke the script by its absolute path.
 
 ## Config
 
-The config is resolved the same way — **look in both, prefer the repo-attached
-one if both exist**:
+The config is derived from the resolved script location, independent of which
+agent directory contains the skill:
 
-1. Repo-attached (preferred): `bitbucket.config` next to the script (`<repo>/.claude/skills/bitbucket/bitbucket.config`)
-2. Global: `~/.claude/bitbucket.config`
+1. Preferred: `bitbucket.config` next to `bitbucket_api.py`
+2. Backward-compatible: `bitbucket.config` at the agent root containing the
+   skill (for example `~/.codex/bitbucket.config` or
+   `<repo>/.agents/bitbucket.config`)
 
 The script already applies this repo-first resolution automatically.
 
@@ -70,7 +85,7 @@ Create: Repository settings → Access tokens → Create.
 All commands are run via Bash tool:
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py <command> [args]
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" <command> [args]
 ```
 
 ### Create Pull Request
@@ -78,7 +93,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py <command> [args]
 **Trigger**: `/bitbucket create-pr`, `/bitbucket pr`, "create PR", "open pull request"
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py create-pr "PROJ-123: Fix customer grid" --description "Summary of changes" --destination master
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" create-pr "fix: IB-123: fix customer grid" --description "Summary of changes" --destination master
 ```
 
 - `--description TEXT` — PR description (markdown)
@@ -92,7 +107,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py create-pr "PROJ-123: Fix cus
 **Trigger**: `/bitbucket list-prs`, `/bitbucket prs`
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py list-prs [STATE]
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" list-prs [STATE]
 ```
 
 - STATE: `OPEN` (default), `MERGED`, `DECLINED`, `SUPERSEDED`
@@ -102,7 +117,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py list-prs [STATE]
 **Trigger**: `/bitbucket get-pr <ID>`, `/bitbucket pr <ID>`
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py get-pr 123
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" get-pr 123
 ```
 
 ### Merge Pull Request
@@ -110,7 +125,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py get-pr 123
 **Trigger**: `/bitbucket merge-pr <ID>`
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py merge-pr 123 --strategy squash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --strategy squash
 ```
 
 - `--strategy`: `merge_commit` (default), `squash`, `fast_forward`
@@ -120,7 +135,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py merge-pr 123 --strategy squa
 **Trigger**: `/bitbucket decline-pr <ID>`
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py decline-pr 123
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" decline-pr 123
 ```
 
 ### PR Comments
@@ -128,7 +143,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py decline-pr 123
 **Trigger**: `/bitbucket pr-comments <ID>`
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py pr-comments 123
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" pr-comments 123
 ```
 
 ### Add Comment to PR
@@ -136,7 +151,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py pr-comments 123
 **Trigger**: `/bitbucket add-comment <ID> <text>`
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py add-comment 123 "LGTM! Ready to merge."
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 "LGTM! Ready to merge."
 ```
 
 ### Pipelines
@@ -144,7 +159,7 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py add-comment 123 "LGTM! Ready
 **Trigger**: `/bitbucket pipelines`
 
 ```bash
-python3 ~/.claude/skills/bitbucket/bitbucket_api.py pipelines [COUNT]
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipelines [COUNT]
 ```
 
 - COUNT: number of recent pipelines to show (default: 10)
@@ -153,7 +168,38 @@ python3 ~/.claude/skills/bitbucket/bitbucket_api.py pipelines [COUNT]
 - `COMPLETED/SUCCESSFUL`, `COMPLETED/FAILED` — terminal results.
 - `IN_PROGRESS/PAUSED` (or `/HALTED`) — **not running**: the pipeline succeeded up to a manual trigger step and is waiting for a human. Its Duration is wall-clock since the pause, so do **not** report it as "stuck", "slow", or "still building". Read it as "built OK, awaiting manual trigger".
 - `IN_PROGRESS` with no stage — genuinely executing.
-- For per-step detail, query `/pipelines/{uuid}/steps/` and read each step's `state.name` / `state.result.name`.
+- For per-step detail and **why** a pipeline failed, use `pipeline-steps` below rather than hand-rolling API calls.
+
+### Pipeline Steps (why a pipeline failed)
+
+**Trigger**: `/bitbucket pipeline-steps <PIPELINE_ID>`
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipeline-steps d4a04f6c
+```
+
+- `PIPELINE_ID` accepts the short id shown in the `pipelines` table (first 8
+  chars) or a full/braced uuid — no manual uuid lookup needed.
+- Lists each step's name/state/result **and** the structured failure reason
+  (e.g. `Container 'build' exceeded memory limit.` for an OOM kill). Check
+  this before diving into logs — infra-level failures (OOM, timeout) surface
+  here directly and are easy to miss by only reading Maven/test output, which
+  can look clean right up to the point the container gets killed.
+
+### Pipeline Log
+
+**Trigger**: `/bitbucket pipeline-log <PIPELINE_ID> [STEP_ID]`
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipeline-log d4a04f6c [--lines N] [--full]
+```
+
+- `STEP_ID` optional — defaults to the first `FAILED` step (falls back to the
+  last step if none failed). Also accepts a short id from `pipeline-steps`.
+- Defaults to the last 200 lines; use `--lines N` or `--full` for more.
+- Handles the log endpoint's redirect to a pre-signed S3 URL correctly (that
+  request must drop the Bitbucket auth header or S3 returns 400) — don't
+  reimplement this with a raw `curl`/`urllib` call.
 
 ### Merge When Green (CI-gated merge)
 
@@ -186,22 +232,22 @@ Notes:
 
 ## PR Title Format
 
-PR title **must** follow the format: `PROJ-XXX: Task title`
+PR title **must** follow the format: `<type>: <ticket(s)>: <summary>`
 
-Example: `PROJ-123: Fix customer grid loading issue`
+1. **Type prefix** — one of `feat`, `fix`, `chore`, `docs`, `refactor`, chosen from what the commit messages indicate. Combine with `/` when the changes span more than one type, e.g. `fix/feat`.
+2. **Ticket ID(s)** — the ticket ID if one exists and is relevant, or a comma-separated list of them, followed by a colon. e.g. `IB-101, IB-102:`. Omit this part if there is no relevant ticket.
+3. **Summary** — a short phrase summarizing the changes.
+
+Examples:
+- `fix: IB-101: stop day slide in LocalDateTime conversion`
+- `fix/feat: IB-101, IB-102: anchor date conversion and add config toggle`
+- `refactor: simplify checkpoint flow routing`
 
 ## PR Description Formatting
 
 Bitbucket PR descriptions use **Markdown** format (not ADF like JIRA).
 
-### Co-Authored-By Line
-
-The text `Co-Authored-By: Claude Opus 4.6 noreply@anthropic.com` **must be italic** in the PR description.
-
-In Markdown, wrap it with `*`:
-```
-*Co-Authored-By: Claude Opus 4.6 noreply@anthropic.com*
-```
+There must be **no `Co-Authored-By` mention anywhere in the PR description**.
 
 ### PR Description Template
 
@@ -210,14 +256,27 @@ In Markdown, wrap it with `*`:
 
 - Change description here
 
-## Test Plan
+## Details
 
-- [ ] Test step here
+### <first commit message subject line>
 
----
+Reformatted commit body here.
 
-*Co-Authored-By: Claude Opus 4.6 noreply@anthropic.com*
+### <second commit message subject line>
+
+Reformatted commit body here.
 ```
+
+### Details section
+
+The `## Details` section follows the `## Summary` section and lists the commit messages that make up the changes:
+
+- Each commit becomes its own subsection: a `###` heading whose text is the commit message subject (first line), followed by the rest of that commit message body.
+- Reformat each commit body properly for Markdown:
+  - Remove the hard line breaks added only for terminal wrapping; join wrapped lines back into normal paragraphs.
+  - Prettify lists into proper Markdown lists.
+  - Wrap class names, code symbols, and other code mentions in backticks (`` ` ``).
+- If an exported commit message contains a `Co-Authored-By` line, **ignore it** — do not carry it into the description.
 
 ## Code Review with Inline Comments
 
@@ -226,12 +285,12 @@ In Markdown, wrap it with `*`:
 Use the `bb-comment.sh` script to add inline code review comments:
 
 ```bash
-~/.claude/skills/bitbucket/scripts/bb-comment.sh <pr-id> <file-path> <line-number> "comment text"
+"$BITBUCKET_SKILL/scripts/bb-comment.sh" <pr-id> <file-path> <line-number> "comment text"
 ```
 
 Example:
 ```bash
-~/.claude/skills/bitbucket/scripts/bb-comment.sh 42 app/code/Vendor/Module/Model/Example.php 45 "Use dependency injection here"
+"$BITBUCKET_SKILL/scripts/bb-comment.sh" 42 app/code/Vendor/Module/Model/Example.php 45 "Use dependency injection here"
 ```
 
 ### Batch Code Review
@@ -239,7 +298,7 @@ Example:
 Use `bb-review.sh` for batch review with multiple comments:
 
 ```bash
-~/.claude/skills/bitbucket/scripts/bb-review.sh <pr-id> <comments-file>
+"$BITBUCKET_SKILL/scripts/bb-review.sh" <pr-id> <comments-file>
 ```
 
 Comments file format (TSV — tab separated):
@@ -250,10 +309,12 @@ file_path<TAB>line_number<TAB>comment_text
 Example:
 ```bash
 echo -e 'src/Model.php\t45\tUse DI here\nsrc/Controller.php\t120\tAdd try/catch' > /tmp/comments.tsv
-~/.claude/skills/bitbucket/scripts/bb-review.sh 42 /tmp/comments.tsv
+"$BITBUCKET_SKILL/scripts/bb-review.sh" 42 /tmp/comments.tsv
 ```
 
-Scripts auto-detect credentials from `~/.claude/bitbucket.config` or environment variables (`BB_WORKSPACE`, `BB_REPO`, `BB_USER`, `BB_APP_PASSWORD`).
+Scripts auto-detect credentials from the config associated with their own
+installation path or environment variables (`BB_WORKSPACE`, `BB_REPO`,
+`BB_USER`, `BB_APP_PASSWORD`).
 
 ## Direct API Reference
 
