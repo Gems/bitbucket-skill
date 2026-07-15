@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.6] - 2026-06-19
+
+### Added
+
+- `merge-when-green` (alias `ship`) agent procedure: resolves/creates the PR, identifies its pipeline run, derives an expected runtime from the most recent successful PR pipeline, waits the deduced remaining time, re-checks (looping until terminal), and merges only on `COMPLETED/SUCCESSFUL`. Deducible from phrasings like "open a PR and get it merged" / "merge when the pipeline is green".
+
+## [0.0.5] - 2026-06-18
+
+### Added
+
+- `pipelines`: status column now includes `state.stage`, so a run halted at a manual trigger reads as `IN_PROGRESS/PAUSED` instead of a bare `IN_PROGRESS` (its duration is wall-clock since the pause, not runtime).
+- Repo-first resolution for both the script and `bitbucket.config`: a repo-attached copy next to the script takes precedence over the global `~/.claude/` location.
+
+### Changed
+
+- SKILL.md: documented the dual-location, repo-first resolution for the script and config, plus pipeline status interpretation.
+
 ## [0.0.4] - 2026-03-19
 
 ### Changed

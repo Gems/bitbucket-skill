@@ -1,6 +1,6 @@
-# Bitbucket Skill for Claude Code
+# Bitbucket Skill
 
-A lightweight Bitbucket Cloud CLI skill for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Manage pull requests, pipelines, and code reviews directly from your terminal — no external dependencies required.
+A lightweight Bitbucket Cloud CLI skill for coding agents. Manage pull requests, pipelines, and code reviews directly from your terminal — no external dependencies required.
 
 ## Features
 
@@ -12,13 +12,16 @@ A lightweight Bitbucket Cloud CLI skill for [Claude Code](https://docs.anthropic
 
 ## Installation
 
-1. Copy the `bitbucket` folder to your Claude Code skills directory:
+1. Copy the `bitbucket` folder to a user-level or project-level skills
+   directory. Supported agent roots are `.claude`, `.agents`, and `.codex`:
 
 ```bash
-cp -r bitbucket ~/.claude/skills/bitbucket
+cp -r bitbucket ~/.codex/skills/bitbucket
+# Or: ~/.agents, ~/.claude, ./.codex, ./.agents, or ./.claude
 ```
 
-2. Create config file at `~/.claude/bitbucket.config`:
+2. Create `bitbucket.config` beside `bitbucket_api.py` (preferred), or at the
+   containing agent root for backward compatibility:
 
 ```json
 {
@@ -32,7 +35,7 @@ cp -r bitbucket ~/.claude/skills/bitbucket
 3. Make scripts executable:
 
 ```bash
-chmod +x ~/.claude/skills/bitbucket/scripts/*.sh
+chmod +x ~/.codex/skills/bitbucket/scripts/*.sh
 ```
 
 ## Authentication
@@ -89,7 +92,7 @@ Supports three auth methods (in priority order):
 
 ## Usage
 
-Once installed, use the `/bitbucket` command in Claude Code:
+Once installed, use the `/bitbucket` command in your coding agent:
 
 ```
 /bitbucket create-pr     — Create a pull request

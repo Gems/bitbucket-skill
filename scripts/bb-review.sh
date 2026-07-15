@@ -14,7 +14,7 @@
 # src/Controller/Api.php	120	Add try/catch for exception handling
 #
 # Requires: BB_WORKSPACE, BB_REPO, BB_USER, BB_APP_PASSWORD environment variables
-# Or reads from ~/.claude/bitbucket.config
+# Or reads bitbucket.config relative to this skill's installation path
 
 set -e
 
@@ -38,8 +38,12 @@ if [[ ! -f "$COMMENTS_FILE" ]]; then
     exit 1
 fi
 
-# Read config from shared bitbucket config
-CONFIG_FILE="$HOME/.claude/bitbucket.config"
+# Read config beside the skill, then fall back to the containing agent root.
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+SKILL_CONFIG="$SCRIPT_DIR/../bitbucket.config"
+ROOT_CONFIG="$SCRIPT_DIR/../../../bitbucket.config"
+CONFIG_FILE="$SKILL_CONFIG"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE="$ROOT_CONFIG"
 if [[ -f "$CONFIG_FILE" ]]; then
     [[ -z "$BB_USER" ]] && BB_USER=$(jq -r '.username // empty' "$CONFIG_FILE" 2>/dev/null || true)
     [[ -z "$BB_APP_PASSWORD" ]] && BB_APP_PASSWORD=$(jq -r '.app_password // empty' "$CONFIG_FILE" 2>/dev/null || true)
@@ -62,7 +66,7 @@ fi
 if [[ -z "$BB_WORKSPACE" || -z "$BB_USER" || -z "$BB_APP_PASSWORD" ]]; then
     echo "Error: Missing Bitbucket credentials"
     echo "Set BB_WORKSPACE, BB_USER, BB_APP_PASSWORD environment variables"
-    echo "Or create ~/.claude/bitbucket.config with username, app_password, workspace, repo_slug"
+    echo "Or create bitbucket.config beside the skill or at its agent root"
     exit 1
 fi
 
