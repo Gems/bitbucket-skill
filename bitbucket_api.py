@@ -166,13 +166,71 @@ def cmd_create_pr(config, title, description="", source=None, destination="maste
     return result
 
 
-def cmd_list_prs(config, state="OPEN"):
+def _parse_list_prs_args(args):
+    state = "OPEN"
+    source_branch = None
+    state_seen = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--source":
+            if (
+                source_branch is not None
+                or index + 1 >= len(args)
+                or args[index + 1].startswith("--")
+            ):
+                print(
+                    "Error: --source requires one branch and cannot be combined "
+                    "with --current-branch",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            source_branch = args[index + 1]
+            index += 2
+        elif arg == "--current-branch":
+            if source_branch is not None:
+                print(
+                    "Error: --current-branch cannot be combined with --source",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            source_branch = _git("branch", "--show-current")
+            if not source_branch:
+                print("Error: could not determine the current branch", file=sys.stderr)
+                sys.exit(1)
+            index += 1
+        elif arg.startswith("--"):
+            print(f"Error: unknown list-prs option: {arg}", file=sys.stderr)
+            sys.exit(1)
+        elif not state_seen:
+            state = arg.upper()
+            state_seen = True
+            index += 1
+        else:
+            print("Error: list-prs accepts at most one STATE", file=sys.stderr)
+            sys.exit(1)
+
+    valid_states = {"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}
+    if state not in valid_states:
+        print(f"Error: invalid pull request state: {state}", file=sys.stderr)
+        sys.exit(1)
+    return state, source_branch
+
+
+def cmd_list_prs(config, state="OPEN", source_branch=None):
     """List pull requests."""
     state = state.upper()
-    data = api_request(config, f"/pullrequests?state={state}&pagelen=25")
-    prs = data.get("values", [])
+    prs = _paginated_values(config, f"/pullrequests?state={state}&pagelen=25")
+    if source_branch is not None:
+        prs = [
+            pr for pr in prs
+            if pr["source"]["branch"]["name"] == source_branch
+        ]
     if not prs:
-        print(f"No {state.lower()} pull requests found.")
+        suffix = (
+            f" for source branch {source_branch!r}" if source_branch is not None else ""
+        )
+        print(f"No {state.lower()} pull requests found{suffix}.")
         return
 
     print(f"## {state.title()} Pull Requests\n")
@@ -182,7 +240,7 @@ def cmd_list_prs(config, state="OPEN"):
         pr_id = pr["id"]
         title = pr["title"][:60]
         author = pr.get("author", {}).get("display_name", "—")
-        branch = pr["source"]["branch"]["name"][:40]
+        branch = pr["source"]["branch"]["name"]
         updated = pr["updated_on"][:10] if pr.get("updated_on") else "—"
         print(f"| {pr_id} | {title} | {author} | {branch} | {updated} |")
 
@@ -209,6 +267,25 @@ def cmd_get_pr(config, pr_id):
     print(f"Created: {created} | Updated: {updated}")
     print(f"URL: {url}")
     print(f"\n{desc}")
+
+
+def cmd_pr_commits(config, pr_id):
+    """List the non-merge commits that belong to a pull request."""
+    commits = _paginated_values(
+        config, f"/pullrequests/{pr_id}/commits?pagelen=50"
+    )
+    commits = [commit for commit in commits if len(commit.get("parents", [])) <= 1]
+    if not commits:
+        print(f"No non-merge commits found for PR #{pr_id}.")
+        return
+
+    print(f"## Non-merge commits for PR #{pr_id}\n")
+    for commit in commits:
+        commit_hash = commit.get("hash", "—")
+        message = (commit.get("message") or "No commit message").rstrip()
+        print(f"### {commit_hash}")
+        print(message)
+        print("\n<<<END>>>\n")
 
 
 def cmd_update_pr(config, pr_id, title=None, description=None):
@@ -534,8 +611,10 @@ USAGE = """Usage: bitbucket_api.py <command> [args]
 Commands:
   create-pr <TITLE> [--description TEXT] [--source BRANCH] [--destination BRANCH] [--no-close]
                                      Create pull request
-  list-prs [STATE]                   List PRs (OPEN/MERGED/DECLINED/SUPERSEDED)
+  list-prs [STATE] [--source BRANCH | --current-branch]
+                                     List PRs (OPEN/MERGED/DECLINED/SUPERSEDED)
   get-pr <ID>                        View PR details
+  pr-commits <ID>                    List a PR's non-merge commits and full messages
   update-pr <ID> [--title TEXT] [--description TEXT] [--description-file PATH]
                                      Update PR title and/or description
   merge-pr <ID> [--strategy S]       Merge PR (merge_commit/squash/fast_forward)
@@ -601,11 +680,14 @@ def main():
         cmd_create_pr(config, title, description, source, destination, close_source)
 
     elif cmd == "list-prs":
-        state = sys.argv[2] if len(sys.argv) > 2 else "OPEN"
-        cmd_list_prs(config, state)
+        state, source_branch = _parse_list_prs_args(sys.argv[2:])
+        cmd_list_prs(config, state, source_branch=source_branch)
 
     elif cmd == "get-pr" and len(sys.argv) >= 3:
         cmd_get_pr(config, sys.argv[2])
+
+    elif cmd == "pr-commits" and len(sys.argv) >= 3:
+        cmd_pr_commits(config, sys.argv[2])
 
     elif cmd == "update-pr" and len(sys.argv) >= 3:
         pr_id = sys.argv[2]
