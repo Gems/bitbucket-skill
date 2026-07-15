@@ -3,7 +3,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
@@ -12,8 +12,11 @@ from bitbucket_api import (
     _config_paths,
     _fetch_pipeline_log,
     _paginated_values,
+    _parse_list_prs_args,
     _parse_pipeline_log_args,
     _read_log_lines,
+    cmd_list_prs,
+    cmd_pr_commits,
 )
 
 
@@ -109,6 +112,93 @@ class PaginationTest(unittest.TestCase):
             ],
             [call for call in api_request.call_args_list],
         )
+
+
+class PullRequestCommandsTest(unittest.TestCase):
+    @patch("bitbucket_api._paginated_values")
+    def test_list_prs_filters_exact_full_source_branch(self, paginated_values):
+        target_branch = "feature/IB-123-a-branch-name-longer-than-forty-characters"
+        paginated_values.return_value = [
+            {
+                "id": 10,
+                "title": "Target PR",
+                "author": {"display_name": "A"},
+                "source": {"branch": {"name": target_branch}},
+                "updated_on": "2026-07-15T12:00:00Z",
+            },
+            {
+                "id": 11,
+                "title": "Different PR",
+                "author": {"display_name": "B"},
+                "source": {"branch": {"name": target_branch + "-other"}},
+                "updated_on": "2026-07-15T12:00:00Z",
+            },
+        ]
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_list_prs({}, "OPEN", source_branch=target_branch)
+
+        paginated_values.assert_called_once_with(
+            {}, "/pullrequests?state=OPEN&pagelen=25"
+        )
+        self.assertIn(target_branch, stdout.getvalue())
+        self.assertIn("Target PR", stdout.getvalue())
+        self.assertNotIn("Different PR", stdout.getvalue())
+
+    @patch("bitbucket_api._paginated_values")
+    def test_pr_commits_uses_pr_endpoint_and_excludes_merges(self, paginated_values):
+        paginated_values.return_value = [
+            {
+                "hash": "regular",
+                "message": "fix: preserve the full message\n\nBody line",
+                "parents": [{"hash": "parent"}],
+            },
+            {
+                "hash": "merge",
+                "message": "Merge branch 'main'",
+                "parents": [{"hash": "one"}, {"hash": "two"}],
+            },
+        ]
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_pr_commits({}, 42)
+
+        paginated_values.assert_called_once_with(
+            {}, "/pullrequests/42/commits?pagelen=50"
+        )
+        self.assertIn("regular", stdout.getvalue())
+        self.assertIn("Body line", stdout.getvalue())
+        self.assertNotIn("Merge branch", stdout.getvalue())
+
+
+class ListPullRequestArgumentsTest(unittest.TestCase):
+    def test_parses_state_and_source_filters(self):
+        self.assertEqual(("OPEN", None), _parse_list_prs_args([]))
+        self.assertEqual(
+            ("MERGED", "feature/IB-123"),
+            _parse_list_prs_args(["merged", "--source", "feature/IB-123"]),
+        )
+        with patch("bitbucket_api._git", return_value="feature/current"):
+            self.assertEqual(
+                ("OPEN", "feature/current"),
+                _parse_list_prs_args(["--current-branch"]),
+            )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            ["--source"],
+            ["--source", "--current-branch"],
+            ["--unknown"],
+            ["OPEN", "MERGED"],
+            ["INVALID"],
+            ["--source", "one", "--current-branch"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_list_prs_args(args)
 
 
 class LogReadingTest(unittest.TestCase):

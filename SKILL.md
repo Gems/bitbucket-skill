@@ -1,11 +1,13 @@
 ---
 name: bitbucket
 description: >
-  Interact with Bitbucket — create PRs, list PRs, view PR details, merge, decline, read comments, view pipelines,
-  CI-gated merge (poll the PR pipeline and merge when green), code review with inline comments, manage environments
-  and variables. Use when user says "/bitbucket pr", "/bitbucket create-pr", "/bitbucket list-prs",
-  "/bitbucket pipelines", "/bitbucket merge-when-green", "/bitbucket ship", asks to open a PR and get it merged once
-  CI passes / merge when the pipeline is green, or similar Bitbucket-related requests.
+  Interact with Bitbucket — create PRs, list PRs, view PR details, update a PR's title/description, merge, decline,
+  read comments, view pipelines, CI-gated merge (poll the PR pipeline and merge when green), code review with inline
+  comments, manage environments and variables. Use when user says "/bitbucket pr", "/bitbucket create-pr",
+  "/bitbucket list-prs", "/bitbucket pipelines", "/bitbucket merge-when-green", "/bitbucket ship",
+  "/bitbucket prettify-pr", "prettify PR", asks to open a PR and get it merged once CI passes / merge when the
+  pipeline is green, asks to regenerate/clean up/fix a PR's title or description from its commits, or similar
+  Bitbucket-related requests.
 argument-hint: "[command] [args]"
 allowed-tools: Bash(python3 *), Bash(*.claude/skills/bitbucket/scripts/*), Bash(*.agents/skills/bitbucket/scripts/*), Bash(*.codex/skills/bitbucket/scripts/*)
 ---
@@ -14,8 +16,10 @@ allowed-tools: Bash(python3 *), Bash(*.claude/skills/bitbucket/scripts/*), Bash(
 
 Lightweight Bitbucket CLI for Claude Code. Uses a Python script that calls Bitbucket Cloud REST API 2.0 directly and returns **compact output** to minimize token usage.
 
-When invoked with arguments (e.g. `/bitbucket create-pr 123`), run the script
-from whichever location exists (see **Script Location** below) with `$ARGUMENTS`.
+For direct CLI commands (e.g. `/bitbucket create-pr 123`), run the script from
+whichever location exists (see **Script Location** below) with `$ARGUMENTS`.
+Do not forward agent procedures such as `prettify-pr`, `merge-when-green`, or
+`ship` as CLI commands; follow their documented workflows instead.
 
 ## Script Location
 
@@ -107,10 +111,12 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" create-pr "fix: IB-123: fix customer
 **Trigger**: `/bitbucket list-prs`, `/bitbucket prs`
 
 ```bash
-python3 "$BITBUCKET_SKILL/bitbucket_api.py" list-prs [STATE]
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" list-prs [STATE] [--source BRANCH | --current-branch]
 ```
 
 - STATE: `OPEN` (default), `MERGED`, `DECLINED`, `SUPERSEDED`
+- `--source BRANCH` filters across every result page by the exact source branch
+- `--current-branch` applies the same exact filter using the current Git branch
 
 ### View Pull Request
 
@@ -119,6 +125,15 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" list-prs [STATE]
 ```bash
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" get-pr 123
 ```
+
+### Pull Request Commits
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" pr-commits 123
+```
+
+- Returns every non-merge commit and its full message in chronological order
+- Uses the PR commits endpoint, so fork-based PRs do not require local remotes
 
 ### Merge Pull Request
 
@@ -145,6 +160,34 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" decline-pr 123
 ```bash
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" pr-comments 123
 ```
+
+### Update Pull Request
+
+**Trigger**: `/bitbucket update-pr <ID>`, "update the PR title/description", "rename this PR"
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" update-pr 123 --title "fix: IB-101: stop day slide" --description-file /tmp/pr-description.md
+```
+
+- `--title TEXT` — new PR title
+- `--description TEXT` — new PR description (markdown), or use `--description-file PATH` for longer content
+- At least one of `--title`/`--description`/`--description-file` must be given
+
+### Prettify PR (regenerate title & description from its commits)
+
+**Trigger**: `/bitbucket prettify-pr <ID>`, "prettify PR <ID>", "clean up the PR description", "fix the PR title and description", "update the PR title/description accordingly"
+
+This is an **agent procedure**, not a `bitbucket_api.py prettify-pr` command.
+Rebuild an existing PR's title and description from its actual commits,
+following **PR Title Format** and **PR Description Formatting** below, then
+apply them with `update-pr`. Follow these steps in order:
+
+1. **Resolve the PR.** If an ID/URL is given, use it; otherwise run `list-prs OPEN --current-branch` and use its exact match. If it returns zero or multiple PRs, stop and ask the user which PR to update. Run `get-pr <ID>` to confirm its source and destination branches.
+2. **Gather the commits.** Run `pr-commits <ID>`. It reads the PR's paginated commits endpoint, works for same-repository and fork-based PRs, returns full commit messages, and excludes merge commits.
+3. **Build the title** per **PR Title Format**.
+4. **Build the description** per **PR Description Formatting**, including the `## Other Changes` split described there.
+5. **Apply it** with `update-pr <ID> --title TEXT --description-file PATH` (write the description to a temp file first — it's typically too long/multiline for a single `--description` argument).
+6. Report the new title and a summary of what moved to `## Other Changes`, if anything.
 
 ### Add Comment to PR
 
@@ -265,6 +308,14 @@ Reformatted commit body here.
 ### <second commit message subject line>
 
 Reformatted commit body here.
+
+## Other Changes
+
+Unrelated to the main purpose, but deliberately included in this change set:
+
+### <commit message subject line>
+
+Reformatted commit body here.
 ```
 
 ### Details section
@@ -277,6 +328,16 @@ The `## Details` section follows the `## Summary` section and lists the commit m
   - Prettify lists into proper Markdown lists.
   - Wrap class names, code symbols, and other code mentions in backticks (`` ` ``).
 - If an exported commit message contains a `Co-Authored-By` line, **ignore it** — do not carry it into the description.
+
+### Other Changes section
+
+Some commits in a change set are deliberately included but aren't part of the PR's main purpose (e.g. an unrelated tooling/config tweak riding along with a feature branch). Don't blend these into `## Details` — split them out:
+
+- Judge each commit against the PR's main purpose (the feature/fix the title describes). If a commit's *primary* content doesn't serve that purpose, it belongs here instead of `## Details`.
+- Add a `## Other Changes` section **after** `## Details`, with a one-line lead-in (e.g. "Unrelated to the main purpose, but deliberately included in this change set:").
+- Format subsections the same way as `## Details` — one `###` per commit, same reformatting rules.
+- If every commit serves the main purpose, omit this section entirely — don't add it empty.
+- A commit that's mostly on-purpose but carries one incidental line (e.g. an unrelated dependency bump mentioned in an otherwise-relevant commit body) stays in `## Details`; only split out commits whose primary content is unrelated.
 
 ## Code Review with Inline Comments
 
