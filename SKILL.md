@@ -1,13 +1,13 @@
 ---
 name: bitbucket
 description: >
-  Interact with Bitbucket — create PRs, list PRs, view PR details, update a PR's title/description, merge, decline,
-  read comments, view pipelines, CI-gated merge (poll the PR pipeline and merge when green), code review with inline
-  comments, manage environments and variables. Use when user says "/bitbucket pr", "/bitbucket create-pr",
-  "/bitbucket list-prs", "/bitbucket pipelines", "/bitbucket merge-when-green", "/bitbucket ship",
-  "/bitbucket prettify-pr", "prettify PR", asks to open a PR and get it merged once CI passes / merge when the
-  pipeline is green, asks to regenerate/clean up/fix a PR's title or description from its commits, or similar
-  Bitbucket-related requests.
+  Interact with Bitbucket — create PRs, list PRs, view PR details, update a PR's title/description, approve, merge,
+  decline, read comments, view pipelines, CI-gated merge (poll the PR pipeline and merge when green), code review with
+  inline comments, manage environments and variables. Use when user says "/bitbucket pr", "/bitbucket create-pr",
+  "/bitbucket list-prs", "/bitbucket approve-pr", "approve PR", "/bitbucket pipelines",
+  "/bitbucket merge-when-green", "/bitbucket ship", "/bitbucket prettify-pr", "prettify PR", asks to open a PR and get
+  it merged once CI passes / merge when the pipeline is green, asks to regenerate/clean up/fix a PR's title or
+  description from its commits, or similar Bitbucket-related requests.
 argument-hint: "[command] [args]"
 allowed-tools: Bash(python3 *), Bash(*.claude/skills/bitbucket/scripts/*), Bash(*.agents/skills/bitbucket/scripts/*), Bash(*.codex/skills/bitbucket/scripts/*)
 ---
@@ -145,6 +145,21 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --strategy squash
 
 - `--strategy`: `merge_commit` (default), `squash`, `fast_forward`
 
+### Approve Pull Request
+
+**Trigger**: `/bitbucket approve-pr <ID>`, "approve PR <ID>", "approve this PR"
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" approve-pr 123
+```
+
+- Approves the PR as the account behind the configured credential — confirm that
+  account is the reviewer the user means, not a shared token, before running it.
+- Only approve when the user explicitly asks for it: an approval is visible to
+  the team and counts toward the repo's merge checks. Never approve as a step of
+  another procedure (e.g. to unblock `merge-when-green`).
+- Prints the approving user and the resulting participant state.
+
 ### Decline Pull Request
 
 **Trigger**: `/bitbucket decline-pr <ID>`
@@ -178,16 +193,18 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" update-pr 123 --title "fix: IB-101: 
 **Trigger**: `/bitbucket prettify-pr <ID>`, "prettify PR <ID>", "clean up the PR description", "fix the PR title and description", "update the PR title/description accordingly"
 
 This is an **agent procedure**, not a `bitbucket_api.py prettify-pr` command.
-Rebuild an existing PR's title and description from its actual commits,
-following **PR Title Format** and **PR Description Formatting** below, then
-apply them with `update-pr`. Follow these steps in order:
+Rebuild an existing PR's title and description so they describe **what the PR
+brings to the destination branch**, using the commits only as evidence of what
+changed — not as the structure of the description. Follow **PR Title Format**
+and **PR Description Formatting** below, then apply with `update-pr`:
 
 1. **Resolve the PR.** If an ID/URL is given, use it; otherwise run `list-prs OPEN --current-branch` and use its exact match. If it returns zero or multiple PRs, stop and ask the user which PR to update. Run `get-pr <ID>` to confirm its source and destination branches.
 2. **Gather the commits.** Run `pr-commits <ID>`. It reads the PR's paginated commits endpoint, works for same-repository and fork-based PRs, returns full commit messages, and excludes merge commits.
-3. **Build the title** per **PR Title Format**.
-4. **Build the description** per **PR Description Formatting**, including the `## Other Changes` split described there.
-5. **Apply it** with `update-pr <ID> --title TEXT --description-file PATH` (write the description to a temp file first — it's typically too long/multiline for a single `--description` argument).
-6. Report the new title and a summary of what moved to `## Other Changes`, if anything.
+3. **Reduce the commits to the net change.** Read them in order and work out the end state of the branch, not its history. Later commits supersede earlier ones: a rename, a reworked approach, or a fix to something introduced earlier in the same branch means only the final form is part of the change. Discard branch-internal scaffolding entirely (see **Excluding branch-internal churn**).
+4. **Build the title** per **PR Title Format**, using the terminology of the branch's *end state*.
+5. **Build the description** per **PR Description Formatting**, grouping the net change into topical sections, including the `## Other Changes` split described there.
+6. **Apply it** with `update-pr <ID> --title TEXT --description-file PATH` (write the description to a temp file first — it's typically too long/multiline for a single `--description` argument).
+7. Report the new title, and say briefly what was dropped as branch-internal churn and what moved to `## Other Changes`, if anything.
 
 ### Add Comment to PR
 
@@ -281,6 +298,12 @@ PR title **must** follow the format: `<type>: <ticket(s)>: <summary>`
 2. **Ticket ID(s)** — the ticket ID if one exists and is relevant, or a comma-separated list of them, followed by a colon. e.g. `IB-101, IB-102:`. Omit this part if there is no relevant ticket.
 3. **Summary** — a short phrase summarizing the changes.
 
+Use the terminology of the branch's **final state**, not of superseded steps: if
+a concept, step, class, or column was renamed during the branch (or the naming
+was settled in discussion), the title must use the settled name. Prefer the
+words actually used by the code and docs at the PR head over wording from
+earlier commit subjects.
+
 Examples:
 - `fix: IB-101: stop day slide in LocalDateTime conversion`
 - `fix/feat: IB-101, IB-102: anchor date conversion and add config toggle`
@@ -292,52 +315,83 @@ Bitbucket PR descriptions use **Markdown** format (not ADF like JIRA).
 
 There must be **no `Co-Authored-By` mention anywhere in the PR description**.
 
+A PR description addresses a reviewer of the **destination branch**. It states
+what that branch gains, in its final shape. It is not a changelog of the source
+branch and not a narrative of how the change was arrived at.
+
 ### PR Description Template
 
 ```markdown
 ## Summary
 
-- Change description here
+- What the destination branch gains, one bullet per user- or reviewer-visible outcome
 
 ## Details
 
-### <first commit message subject line>
+### <topic of the change>
 
-Reformatted commit body here.
+What this part of the change does, in its final form.
 
-### <second commit message subject line>
+### <another topic>
 
-Reformatted commit body here.
+...
 
 ## Other Changes
 
 Unrelated to the main purpose, but deliberately included in this change set:
 
-### <commit message subject line>
+### <topic>
 
-Reformatted commit body here.
+...
 ```
 
 ### Details section
 
-The `## Details` section follows the `## Summary` section and lists the commit messages that make up the changes:
+The `## Details` section follows `## Summary` and elaborates the net change,
+organized **by topic**, not by commit:
 
-- Each commit becomes its own subsection: a `###` heading whose text is the commit message subject (first line), followed by the rest of that commit message body.
-- Reformat each commit body properly for Markdown:
+- Group related work into `###` subsections named after what changed (e.g. a new
+  capability, a schema change, the filtering behavior, docs and tests) — do not
+  emit one subsection per commit, and do not use commit subjects as headings.
+- Describe the **end state**: what the code does after the merge. Never write
+  history ("first added X, then renamed it to Y") — write Y.
+- Several commits touching one topic collapse into one subsection; one large
+  commit touching several topics splits across them.
+- Reformat prose properly for Markdown:
   - Remove the hard line breaks added only for terminal wrapping; join wrapped lines back into normal paragraphs.
   - Prettify lists into proper Markdown lists.
   - Wrap class names, code symbols, and other code mentions in backticks (`` ` ``).
-- If an exported commit message contains a `Co-Authored-By` line, **ignore it** — do not carry it into the description.
+- If a commit message contains a `Co-Authored-By` line, **ignore it** — do not carry it into the description.
+
+### Excluding branch-internal churn
+
+Commits that only exist because of how the branch was developed are **not
+changes to the destination branch** and must not appear in the description at
+all — not as subsections, not as bullets:
+
+- Fixups of code introduced earlier in the same branch: missing imports, missing
+  or changed test parameters, compile errors, formatting, typo fixes.
+- Review churn and rework: renames, reshuffles, and approach changes internal to
+  the branch. Only the final name/approach is described.
+- Superseded approaches: if the branch first implemented the feature one way and
+  later replaced it, describe only the replacement. Do not mention what it
+  replaced unless the *destination branch* already contained that older
+  behavior, in which case the replacement itself is the change worth stating.
+- WIP/checkpoint commits, merges from the destination branch, and reverts paired
+  with the commit they revert.
+
+Rule of thumb: if the commit's effect is invisible in a diff of destination →
+PR head, it is churn. Fold its content into the topic it belongs to, or drop it.
 
 ### Other Changes section
 
-Some commits in a change set are deliberately included but aren't part of the PR's main purpose (e.g. an unrelated tooling/config tweak riding along with a feature branch). Don't blend these into `## Details` — split them out:
+Some work in a change set is deliberately included but isn't part of the PR's main purpose (e.g. an unrelated tooling/config tweak riding along with a feature branch). Don't blend it into `## Details` — split it out:
 
-- Judge each commit against the PR's main purpose (the feature/fix the title describes). If a commit's *primary* content doesn't serve that purpose, it belongs here instead of `## Details`.
+- Judge each topic against the PR's main purpose (the feature/fix the title describes). If its *primary* content doesn't serve that purpose, it belongs here instead of `## Details`.
 - Add a `## Other Changes` section **after** `## Details`, with a one-line lead-in (e.g. "Unrelated to the main purpose, but deliberately included in this change set:").
-- Format subsections the same way as `## Details` — one `###` per commit, same reformatting rules.
-- If every commit serves the main purpose, omit this section entirely — don't add it empty.
-- A commit that's mostly on-purpose but carries one incidental line (e.g. an unrelated dependency bump mentioned in an otherwise-relevant commit body) stays in `## Details`; only split out commits whose primary content is unrelated.
+- Format subsections the same way as `## Details` — topical `###` headings, same reformatting rules.
+- If everything serves the main purpose, omit this section entirely — don't add it empty.
+- Something mostly on-purpose that carries one incidental line (e.g. an unrelated dependency bump) stays in `## Details`; only split out work whose primary content is unrelated.
 
 ## Code Review with Inline Comments
 
