@@ -315,6 +315,10 @@ Bitbucket PR descriptions use **Markdown** format (not ADF like JIRA).
 
 There must be **no `Co-Authored-By` mention anywhere in the PR description**.
 
+There must be **no standalone "Test Coverage" / "Testing" section**. If tests
+were added or changed, fold that into the relevant `## Details` (or
+`## Other Changes`) topic instead of breaking it out on its own.
+
 A PR description addresses a reviewer of the **destination branch**. It states
 what that branch gains, in its final shape. It is not a changelog of the source
 branch and not a narrative of how the change was arrived at.
