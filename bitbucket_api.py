@@ -325,6 +325,16 @@ def cmd_merge_pr(config, pr_id, strategy="merge_commit"):
     print(f"Merge commit: {data.get('merge_commit', {}).get('hash', '—')[:12]}")
 
 
+def cmd_approve_pr(config, pr_id):
+    """Approve a pull request on behalf of the configured account."""
+    data = api_request(
+        config, f"/pullrequests/{pr_id}/approve", method="POST"
+    )
+    user = data.get("user", {}).get("display_name", "—")
+    state = data.get("state") or ("approved" if data.get("approved") else "—")
+    print(f"Approved PR #{pr_id} as {user} (state: {state})")
+
+
 def cmd_decline_pr(config, pr_id):
     """Decline a pull request."""
     data = api_request(config, f"/pullrequests/{pr_id}/decline", method="POST")
@@ -618,6 +628,7 @@ Commands:
   update-pr <ID> [--title TEXT] [--description TEXT] [--description-file PATH]
                                      Update PR title and/or description
   merge-pr <ID> [--strategy S]       Merge PR (merge_commit/squash/fast_forward)
+  approve-pr <ID>                    Approve PR as the configured account
   decline-pr <ID>                    Decline PR
   pr-comments <ID>                   List PR comments
   add-comment <ID> <TEXT>            Add comment to PR
@@ -716,6 +727,9 @@ def main():
             if idx + 1 < len(sys.argv):
                 strategy = sys.argv[idx + 1]
         cmd_merge_pr(config, sys.argv[2], strategy)
+
+    elif cmd == "approve-pr" and len(sys.argv) >= 3:
+        cmd_approve_pr(config, sys.argv[2])
 
     elif cmd == "decline-pr" and len(sys.argv) >= 3:
         cmd_decline_pr(config, sys.argv[2])

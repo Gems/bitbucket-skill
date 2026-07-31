@@ -4,7 +4,7 @@ A lightweight Bitbucket Cloud CLI skill for coding agents. Manage pull requests,
 
 ## Features
 
-- **Pull Requests**: Create, list, view, merge, decline PRs
+- **Pull Requests**: Create, list, view, approve, merge, decline PRs
 - **Comments**: Add general and inline code review comments
 - **Pipelines**: View recent pipeline runs and statuses
 - **Batch Code Review**: Add multiple inline comments at once
@@ -98,6 +98,7 @@ Once installed, use the `/bitbucket` command in your coding agent:
 /bitbucket create-pr     — Create a pull request
 /bitbucket list-prs      — List open PRs
 /bitbucket get-pr 123    — View PR details
+/bitbucket approve-pr 123 — Approve a PR
 /bitbucket merge-pr 123  — Merge a PR
 /bitbucket pr-comments 123 — View PR comments
 /bitbucket pipelines     — View recent pipelines

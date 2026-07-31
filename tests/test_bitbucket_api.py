@@ -15,6 +15,7 @@ from bitbucket_api import (
     _parse_list_prs_args,
     _parse_pipeline_log_args,
     _read_log_lines,
+    cmd_approve_pr,
     cmd_list_prs,
     cmd_pr_commits,
 )
@@ -171,6 +172,25 @@ class PullRequestCommandsTest(unittest.TestCase):
         self.assertIn("regular", stdout.getvalue())
         self.assertIn("Body line", stdout.getvalue())
         self.assertNotIn("Merge branch", stdout.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_approve_pr_posts_to_approve_endpoint(self, api_request):
+        api_request.return_value = {
+            "approved": True,
+            "state": "approved",
+            "user": {"display_name": "Reviewer Name"},
+        }
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_approve_pr({}, 42)
+
+        api_request.assert_called_once_with(
+            {}, "/pullrequests/42/approve", method="POST"
+        )
+        self.assertIn("Approved PR #42", stdout.getvalue())
+        self.assertIn("Reviewer Name", stdout.getvalue())
+        self.assertIn("approved", stdout.getvalue())
 
 
 class ListPullRequestArgumentsTest(unittest.TestCase):

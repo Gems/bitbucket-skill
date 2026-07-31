@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `approve-pr <ID>`: approves a PR via `POST /pullrequests/{id}/approve` as the account behind the configured credential, printing the approving user and resulting participant state. SKILL.md documents it as explicit-request-only — an approval is team-visible and counts toward merge checks, so it is never a step of another procedure.
+
 ## [0.0.6] - 2026-06-19
 
 ### Added
