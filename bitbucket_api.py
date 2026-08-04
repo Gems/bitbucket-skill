@@ -135,7 +135,137 @@ def _detect_repo_info():
     return _parse_remote(remote)
 
 
+# ─── Argument validation ─────────────────────────────
+#
+# Every command parses its own argv tail through these helpers and exits on
+# anything it does not understand. Silently skipping an unrecognised argument
+# is never acceptable here: the commands write to a shared PR, so a dropped
+# flag ships a wrong title, an empty description, or the wrong merge strategy.
+
+def _fail(message):
+    """Report a usage error on stderr and exit non-zero."""
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _looks_like_option(arg):
+    return arg.startswith("--")
+
+
+def _looks_like_flag_name(arg):
+    """`--word`-shaped, unlike a markdown `---` rule that opens a comment."""
+    return arg.startswith("--") and arg[2:3].isalpha()
+
+
+def _option_value(args, index, what):
+    """Return the value following the option at args[index].
+
+    A flag-shaped value means the option swallowed the next flag
+    (`update-pr 1 --title --description x`), which would otherwise ship
+    `--description` as the new title.
+    """
+    flag = args[index]
+    if index + 1 >= len(args):
+        _fail(f"{flag} requires {what}")
+    value = args[index + 1]
+    if _looks_like_flag_name(value):
+        _fail(f"{flag} requires {what}, got the option {value}")
+    return value
+
+
+def _leading_positional(command, args, name):
+    """Split a command's required leading positional off from its options.
+
+    Options are rejected in that slot, so a flag that swallowed its value
+    (`get-pr --title x`) fails instead of being sent as an ID.
+    """
+    if not args:
+        _fail(f"{command} requires a {name}")
+    if _looks_like_option(args[0]):
+        _fail(f"{command} requires a {name} before its options, got {args[0]}")
+    return args[0], args[1:]
+
+
+def _single_positional(command, args, name):
+    """Parse a command that takes exactly one positional and no options."""
+    value, rest = _leading_positional(command, args, name)
+    if rest:
+        _fail(
+            f"{command} accepts exactly one {name}, "
+            f"got extra argument: {rest[0]!r}"
+        )
+    return value
+
+
+def _validate_pr_id(command, value):
+    if not value.isdigit() or int(value) < 1:
+        _fail(
+            f"{command} requires a numeric PR ID (not a URL or branch), "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _single_pr_id(command, args):
+    return _validate_pr_id(command, _single_positional(command, args, "PR ID"))
+
+
 # ─── Commands ────────────────────────────────────────
+
+def _parse_description_flag(command, args, index, already_set):
+    """Resolve --description/--description-file at args[index] to its text.
+
+    Exits when the flag is repeated, combined with its sibling, missing its
+    value, or points at a file that cannot be read.
+    """
+    flag = args[index]
+    if already_set:
+        _fail(f"{command} accepts only one of --description/--description-file")
+    value = _option_value(args, index, "a value")
+    if flag == "--description":
+        return value
+    try:
+        with open(value, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError as error:
+        _fail(f"could not read {value}: {error.strerror or error}")
+
+
+def _parse_create_pr_args(args):
+    title, rest = _leading_positional("create-pr", args, "TITLE")
+    if not title.strip():
+        _fail("create-pr requires a non-empty TITLE")
+    description = None
+    source = None
+    destination = "master"
+    close_source = True
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        if arg in ("--description", "--description-file"):
+            description = _parse_description_flag(
+                "create-pr", rest, index, description is not None
+            )
+            index += 2
+        elif arg in ("--source", "--destination"):
+            branch = _option_value(rest, index, "a branch")
+            if arg == "--source":
+                source = branch
+            else:
+                destination = branch
+            index += 2
+        elif arg == "--no-close":
+            close_source = False
+            index += 1
+        elif _looks_like_option(arg):
+            _fail(f"unknown create-pr option: {arg}")
+        else:
+            _fail(
+                f"unexpected create-pr argument: {arg!r} "
+                "(the title must be a single quoted argument)"
+            )
+    return title, description or "", source, destination, close_source
+
 
 def cmd_create_pr(config, title, description="", source=None, destination="master",
                   close_source=True, reviewers=None):
@@ -177,43 +307,36 @@ def _parse_list_prs_args(args):
             if (
                 source_branch is not None
                 or index + 1 >= len(args)
-                or args[index + 1].startswith("--")
+                or _looks_like_option(args[index + 1])
             ):
-                print(
-                    "Error: --source requires one branch and cannot be combined "
-                    "with --current-branch",
-                    file=sys.stderr,
+                _fail(
+                    "--source requires one branch and cannot be combined "
+                    "with --current-branch"
                 )
-                sys.exit(1)
             source_branch = args[index + 1]
             index += 2
         elif arg == "--current-branch":
             if source_branch is not None:
-                print(
-                    "Error: --current-branch cannot be combined with --source",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                _fail("--current-branch cannot be combined with --source")
             source_branch = _git("branch", "--show-current")
             if not source_branch:
-                print("Error: could not determine the current branch", file=sys.stderr)
-                sys.exit(1)
+                _fail("could not determine the current branch")
             index += 1
-        elif arg.startswith("--"):
-            print(f"Error: unknown list-prs option: {arg}", file=sys.stderr)
-            sys.exit(1)
+        elif _looks_like_option(arg):
+            _fail(f"unknown list-prs option: {arg}")
         elif not state_seen:
             state = arg.upper()
             state_seen = True
             index += 1
         else:
-            print("Error: list-prs accepts at most one STATE", file=sys.stderr)
-            sys.exit(1)
+            _fail("list-prs accepts at most one STATE")
 
     valid_states = {"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}
     if state not in valid_states:
-        print(f"Error: invalid pull request state: {state}", file=sys.stderr)
-        sys.exit(1)
+        _fail(
+            f"invalid pull request state: {state} "
+            f"(expected one of: {', '.join(sorted(valid_states))})"
+        )
     return state, source_branch
 
 
@@ -288,6 +411,33 @@ def cmd_pr_commits(config, pr_id):
         print("\n<<<END>>>\n")
 
 
+def _parse_update_pr_args(args):
+    pr_id, rest = _leading_positional("update-pr", args, "PR ID")
+    _validate_pr_id("update-pr", pr_id)
+    title = None
+    description = None
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        if arg in ("--description", "--description-file"):
+            description = _parse_description_flag(
+                "update-pr", rest, index, description is not None
+            )
+            index += 2
+        elif arg == "--title":
+            title = _option_value(rest, index, "a value")
+            if not title.strip():
+                _fail("--title requires a non-empty value")
+            index += 2
+        elif _looks_like_option(arg):
+            _fail(f"unknown update-pr option: {arg}")
+        else:
+            _fail(f"unexpected update-pr argument: {arg!r}")
+    if title is None and description is None:
+        _fail("provide at least one of --title, --description, --description-file")
+    return pr_id, title, description
+
+
 def cmd_update_pr(config, pr_id, title=None, description=None):
     """Update a pull request's title and/or description."""
     payload = {}
@@ -297,11 +447,7 @@ def cmd_update_pr(config, pr_id, title=None, description=None):
         payload["description"] = description
 
     if not payload:
-        print(
-            "Error: provide at least one of --title, --description, --description-file",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _fail("provide at least one of --title, --description, --description-file")
 
     result = api_request(
         config, f"/pullrequests/{pr_id}", method="PUT", data=payload
@@ -311,6 +457,33 @@ def cmd_update_pr(config, pr_id, title=None, description=None):
         desc_len = len(result.get("description") or "")
         print(f"Description length: {desc_len} chars")
     print(f"URL: {result['links']['html']['href']}")
+
+
+MERGE_STRATEGIES = ("merge_commit", "squash", "fast_forward")
+
+
+def _parse_merge_pr_args(args):
+    pr_id, rest = _leading_positional("merge-pr", args, "PR ID")
+    _validate_pr_id("merge-pr", pr_id)
+    strategy = "merge_commit"
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        if arg == "--strategy":
+            strategy = _option_value(
+                rest, index, f"one of: {', '.join(MERGE_STRATEGIES)}"
+            )
+            if strategy not in MERGE_STRATEGIES:
+                _fail(
+                    f"unknown merge strategy: {strategy} "
+                    f"(expected one of: {', '.join(MERGE_STRATEGIES)})"
+                )
+            index += 2
+        elif _looks_like_option(arg):
+            _fail(f"unknown merge-pr option: {arg}")
+        else:
+            _fail(f"unexpected merge-pr argument: {arg!r}")
+    return pr_id, strategy
 
 
 def cmd_merge_pr(config, pr_id, strategy="merge_commit"):
@@ -362,6 +535,25 @@ def cmd_pr_comments(config, pr_id):
             location = f" (`{path}:{line}`)"
         print(f"**{author}** — {created}{location}")
         print(f"{body}\n")
+
+
+def _parse_add_comment_args(args):
+    pr_id, rest = _leading_positional("add-comment", args, "PR ID")
+    _validate_pr_id("add-comment", pr_id)
+    if not rest:
+        _fail("add-comment requires comment text")
+    # The remaining words are joined into the comment, so nothing can be
+    # dropped - but add-comment has no options, so an option-shaped first
+    # word is a typo rather than prose. A markdown `---` rule still passes.
+    if _looks_like_flag_name(rest[0]):
+        _fail(
+            f"unknown add-comment option: {rest[0]} "
+            "(usage: add-comment <ID> <TEXT>)"
+        )
+    text = " ".join(rest)
+    if not text.strip():
+        _fail("add-comment requires non-empty comment text")
+    return pr_id, text
 
 
 def cmd_add_comment(config, pr_id, text):
@@ -554,37 +746,53 @@ def cmd_pipeline_log(config, pipeline_id, step_id=None, lines=200):
 
 
 def _parse_pipeline_log_args(args):
+    pipeline_id, rest = _leading_positional("pipeline-log", args, "PIPELINE_ID")
     step_id = None
     lines = 200
     index = 0
-    while index < len(args):
-        arg = args[index]
+    while index < len(rest):
+        arg = rest[index]
         if arg == "--lines":
-            if index + 1 >= len(args):
-                print("Error: --lines requires a positive integer", file=sys.stderr)
-                sys.exit(1)
+            value = _option_value(rest, index, "a positive integer")
             try:
-                lines = int(args[index + 1])
+                lines = int(value)
             except ValueError:
-                print("Error: --lines requires a positive integer", file=sys.stderr)
-                sys.exit(1)
+                _fail("--lines requires a positive integer")
             if lines <= 0:
-                print("Error: --lines must be a positive integer", file=sys.stderr)
-                sys.exit(1)
+                _fail("--lines must be a positive integer")
             index += 2
         elif arg == "--full":
             lines = None
             index += 1
-        elif arg.startswith("--"):
-            print(f"Error: unknown pipeline-log option: {arg}", file=sys.stderr)
-            sys.exit(1)
+        elif _looks_like_option(arg):
+            _fail(f"unknown pipeline-log option: {arg}")
         elif step_id is None:
             step_id = arg
             index += 1
         else:
-            print("Error: pipeline-log accepts at most one STEP_ID", file=sys.stderr)
-            sys.exit(1)
-    return step_id, lines
+            _fail("pipeline-log accepts at most one STEP_ID")
+    return pipeline_id, step_id, lines
+
+
+# Bitbucket caps a page at 100 results, and this listing is not paginated -
+# a larger COUNT would silently return 100 rows, so reject it up front.
+MAX_PIPELINE_COUNT = 100
+
+
+def _parse_pipelines_args(args):
+    if not args:
+        return 10
+    value = _single_positional("pipelines", args, "COUNT")
+    try:
+        count = int(value)
+    except ValueError:
+        count = 0
+    if not 1 <= count <= MAX_PIPELINE_COUNT:
+        _fail(
+            f"pipelines COUNT must be an integer between 1 and "
+            f"{MAX_PIPELINE_COUNT} (the API page size cap), got {value!r}"
+        )
+    return count
 
 
 def cmd_pipelines(config, count=10):
@@ -619,13 +827,14 @@ def cmd_pipelines(config, count=10):
 USAGE = """Usage: bitbucket_api.py <command> [args]
 
 Commands:
-  create-pr <TITLE> [--description TEXT] [--source BRANCH] [--destination BRANCH] [--no-close]
+  create-pr <TITLE> [--description TEXT | --description-file PATH]
+                    [--source BRANCH] [--destination BRANCH] [--no-close]
                                      Create pull request
   list-prs [STATE] [--source BRANCH | --current-branch]
                                      List PRs (OPEN/MERGED/DECLINED/SUPERSEDED)
   get-pr <ID>                        View PR details
   pr-commits <ID>                    List a PR's non-merge commits and full messages
-  update-pr <ID> [--title TEXT] [--description TEXT] [--description-file PATH]
+  update-pr <ID> [--title TEXT] [--description TEXT | --description-file PATH]
                                      Update PR title and/or description
   merge-pr <ID> [--strategy S]       Merge PR (merge_commit/squash/fast_forward)
   approve-pr <ID>                    Approve PR as the configured account
@@ -638,9 +847,27 @@ Commands:
                                      Fetch a step's log (defaults to the first FAILED step, last N lines)"""
 
 
+COMMANDS = (
+    "create-pr", "list-prs", "get-pr", "pr-commits", "update-pr", "merge-pr",
+    "approve-pr", "decline-pr", "pr-comments", "add-comment", "pipelines",
+    "pipeline-steps", "pipeline-log",
+)
+
+
 def main():
     if len(sys.argv) < 2:
         print(USAGE)
+        sys.exit(1)
+
+    cmd, args = sys.argv[1], sys.argv[2:]
+
+    if cmd in ("help", "--help", "-h"):
+        print(USAGE)
+        return
+
+    if cmd not in COMMANDS:
+        print(f"Error: unknown command: {cmd}", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         sys.exit(1)
 
     config = load_config()
@@ -664,98 +891,52 @@ def main():
             )
             sys.exit(1)
 
-    cmd = sys.argv[1]
-
-    if cmd == "create-pr" and len(sys.argv) >= 3:
-        title = sys.argv[2]
-        description = ""
-        source = None
-        destination = "master"
-        close_source = True
-        i = 3
-        while i < len(sys.argv):
-            if sys.argv[i] == "--description" and i + 1 < len(sys.argv):
-                description = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--source" and i + 1 < len(sys.argv):
-                source = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--destination" and i + 1 < len(sys.argv):
-                destination = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--no-close":
-                close_source = False
-                i += 1
-            else:
-                i += 1
+    if cmd == "create-pr":
+        title, description, source, destination, close_source = (
+            _parse_create_pr_args(args)
+        )
         cmd_create_pr(config, title, description, source, destination, close_source)
 
     elif cmd == "list-prs":
-        state, source_branch = _parse_list_prs_args(sys.argv[2:])
+        state, source_branch = _parse_list_prs_args(args)
         cmd_list_prs(config, state, source_branch=source_branch)
 
-    elif cmd == "get-pr" and len(sys.argv) >= 3:
-        cmd_get_pr(config, sys.argv[2])
+    elif cmd == "get-pr":
+        cmd_get_pr(config, _single_pr_id(cmd, args))
 
-    elif cmd == "pr-commits" and len(sys.argv) >= 3:
-        cmd_pr_commits(config, sys.argv[2])
+    elif cmd == "pr-commits":
+        cmd_pr_commits(config, _single_pr_id(cmd, args))
 
-    elif cmd == "update-pr" and len(sys.argv) >= 3:
-        pr_id = sys.argv[2]
-        title = None
-        description = None
-        i = 3
-        while i < len(sys.argv):
-            if sys.argv[i] == "--title" and i + 1 < len(sys.argv):
-                title = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--description" and i + 1 < len(sys.argv):
-                description = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--description-file" and i + 1 < len(sys.argv):
-                with open(sys.argv[i + 1]) as f:
-                    description = f.read()
-                i += 2
-            else:
-                i += 1
+    elif cmd == "update-pr":
+        pr_id, title, description = _parse_update_pr_args(args)
         cmd_update_pr(config, pr_id, title=title, description=description)
 
-    elif cmd == "merge-pr" and len(sys.argv) >= 3:
-        strategy = "merge_commit"
-        if "--strategy" in sys.argv:
-            idx = sys.argv.index("--strategy")
-            if idx + 1 < len(sys.argv):
-                strategy = sys.argv[idx + 1]
-        cmd_merge_pr(config, sys.argv[2], strategy)
+    elif cmd == "merge-pr":
+        pr_id, strategy = _parse_merge_pr_args(args)
+        cmd_merge_pr(config, pr_id, strategy)
 
-    elif cmd == "approve-pr" and len(sys.argv) >= 3:
-        cmd_approve_pr(config, sys.argv[2])
+    elif cmd == "approve-pr":
+        cmd_approve_pr(config, _single_pr_id(cmd, args))
 
-    elif cmd == "decline-pr" and len(sys.argv) >= 3:
-        cmd_decline_pr(config, sys.argv[2])
+    elif cmd == "decline-pr":
+        cmd_decline_pr(config, _single_pr_id(cmd, args))
 
-    elif cmd == "pr-comments" and len(sys.argv) >= 3:
-        cmd_pr_comments(config, sys.argv[2])
+    elif cmd == "pr-comments":
+        cmd_pr_comments(config, _single_pr_id(cmd, args))
 
-    elif cmd == "add-comment" and len(sys.argv) >= 4:
-        text = " ".join(sys.argv[3:])
-        cmd_add_comment(config, sys.argv[2], text)
+    elif cmd == "add-comment":
+        pr_id, text = _parse_add_comment_args(args)
+        cmd_add_comment(config, pr_id, text)
 
     elif cmd == "pipelines":
-        count = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-        cmd_pipelines(config, count)
+        cmd_pipelines(config, _parse_pipelines_args(args))
 
-    elif cmd == "pipeline-steps" and len(sys.argv) >= 3:
-        cmd_pipeline_steps(config, sys.argv[2])
+    elif cmd == "pipeline-steps":
+        cmd_pipeline_steps(config, _single_positional(cmd, args, "PIPELINE_ID"))
 
-    elif cmd == "pipeline-log" and len(sys.argv) >= 3:
-        pipeline_id = sys.argv[2]
-        step_id, lines = _parse_pipeline_log_args(sys.argv[3:])
+    elif cmd == "pipeline-log":
+        pipeline_id, step_id, lines = _parse_pipeline_log_args(args)
         cmd_pipeline_log(config, pipeline_id, step_id, lines)
-
-    else:
-        print(USAGE)
-        sys.exit(1)
 
 
 if __name__ == "__main__":

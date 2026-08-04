@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `approve-pr <ID>`: approves a PR via `POST /pullrequests/{id}/approve` as the account behind the configured credential, printing the approving user and resulting participant state. SKILL.md documents it as explicit-request-only — an approval is team-visible and counts toward merge checks, so it is never a step of another procedure.
+- `create-pr`: `--description-file PATH`, matching `update-pr`, so a full description no longer has to fit in a single shell argument.
+
+### Fixed
+
+- Every command now validates its own arguments and exits with a specific error before any API call, instead of silently ignoring what it does not understand. Previously `create-pr --description-file x.md` dropped the flag and opened a PR with an empty description, `merge-pr 1 --strategy squash-all` merged with the default strategy, `pipelines 500` quietly returned one 100-row page, and a bare `get-pr` printed the usage block with no indication of what was wrong.
+  - Unknown options, flags missing their value, and stray positional arguments (such as an unquoted `create-pr` title) are rejected everywhere.
+  - PR IDs must be numeric, so a URL or branch name is caught locally rather than sent to the API.
+  - A leading positional can no longer be filled by an option: `pipeline-log --full` and `update-pr --title T` now report the missing ID.
+  - An option can no longer swallow the following flag as its value: `update-pr 1 --title --description x` used to set the title to `--description`. Comment text and descriptions starting with a markdown `---` rule are still accepted.
+  - `--strategy` is checked against `merge_commit`/`squash`/`fast_forward`, `pipelines COUNT` against the API's 1–100 page cap, and `list-prs STATE` reports the valid states.
+  - Unreadable `--description-file` paths report the OS error instead of raising a traceback; `--description` and `--description-file` together are rejected.
+  - An unknown command prints `Error: unknown command: X` plus usage on stderr; `help`/`--help`/`-h` print usage and exit 0 without needing a config file.
 
 ## [0.0.6] - 2026-06-19
 
