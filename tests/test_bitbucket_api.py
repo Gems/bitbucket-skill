@@ -1,4 +1,7 @@
 import io
+import os
+import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -8,16 +11,25 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
 from bitbucket_api import (
+    COMMANDS,
     _NoRedirect,
     _config_paths,
     _fetch_pipeline_log,
     _paginated_values,
+    _parse_add_comment_args,
+    _parse_create_pr_args,
     _parse_list_prs_args,
+    _parse_merge_pr_args,
     _parse_pipeline_log_args,
+    _parse_pipelines_args,
+    _parse_update_pr_args,
     _read_log_lines,
+    _single_positional,
+    _single_pr_id,
     cmd_approve_pr,
     cmd_list_prs,
     cmd_pr_commits,
+    main,
 )
 
 
@@ -221,6 +233,230 @@ class ListPullRequestArgumentsTest(unittest.TestCase):
                     _parse_list_prs_args(args)
 
 
+def _description_file(test, text):
+    handle, path = tempfile.mkstemp()
+    with os.fdopen(handle, "w", encoding="utf-8") as file:
+        file.write(text)
+    test.addCleanup(os.unlink, path)
+    return path
+
+
+class CreatePullRequestArgumentsTest(unittest.TestCase):
+    def test_defaults_when_only_a_title_is_given(self):
+        self.assertEqual(
+            ("feat: x", "", None, "master", True), _parse_create_pr_args(["feat: x"])
+        )
+
+    def test_parses_description_source_destination_and_no_close(self):
+        self.assertEqual(
+            ("feat: x", "Summary", "feature/IB-123", "develop", False),
+            _parse_create_pr_args([
+                "feat: x",
+                "--description", "Summary",
+                "--source", "feature/IB-123",
+                "--destination", "develop",
+                "--no-close",
+            ]),
+        )
+
+    def test_reads_description_from_file(self):
+        path = _description_file(self, "## Summary\n\nLong body\n")
+
+        self.assertEqual(
+            ("feat: x", "## Summary\n\nLong body\n", None, "master", True),
+            _parse_create_pr_args(["feat: x", "--description-file", path]),
+        )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            [],
+            [""],
+            ["--description", "only a description"],
+            ["t", "--description"],
+            ["t", "--description-file"],
+            ["t", "--description-file", "/nonexistent/description.md"],
+            ["t", "--description", "a", "--description-file", "/tmp/b.md"],
+            ["t", "--description", "a", "--description", "b"],
+            ["t", "--source"],
+            ["t", "--source", "--no-close"],
+            ["t", "--destination"],
+            ["t", "--description", "--source", "b"],
+            ["t", "--unknown"],
+            ["t", "--descriptionfile", "/tmp/b.md"],
+            ["fix:", "unquoted title tail"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_create_pr_args(args)
+
+
+class UpdatePullRequestArgumentsTest(unittest.TestCase):
+    def test_parses_title_and_description_sources(self):
+        self.assertEqual(
+            ("42", "New title", "New body"),
+            _parse_update_pr_args([
+                "42", "--title", "New title", "--description", "New body",
+            ]),
+        )
+        path = _description_file(self, "From file")
+        self.assertEqual(
+            ("42", None, "From file"),
+            _parse_update_pr_args(["42", "--description-file", path]),
+        )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            [],
+            ["42"],
+            ["--title", "no id"],
+            ["not-an-id", "--title", "T"],
+            ["42", "--title"],
+            ["42", "--title", " "],
+            ["42", "--title", "--description", "body"],
+            ["42", "--description"],
+            ["42", "--description-file"],
+            ["42", "--description-file", "/nonexistent/description.md"],
+            ["42", "--description", "a", "--description-file", "/tmp/b.md"],
+            ["42", "--unknown"],
+            ["42", "stray"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_update_pr_args(args)
+
+
+class MergePullRequestArgumentsTest(unittest.TestCase):
+    def test_defaults_to_merge_commit_and_accepts_known_strategies(self):
+        self.assertEqual(("42", "merge_commit"), _parse_merge_pr_args(["42"]))
+        self.assertEqual(
+            ("42", "squash"), _parse_merge_pr_args(["42", "--strategy", "squash"])
+        )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            [],
+            ["--strategy", "squash"],
+            ["abc"],
+            ["42", "--strategy"],
+            ["42", "--strategy", "rebase"],
+            ["42", "--unknown"],
+            ["42", "43"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_merge_pr_args(args)
+
+
+class AddCommentArgumentsTest(unittest.TestCase):
+    def test_joins_the_remaining_words_into_the_comment(self):
+        self.assertEqual(("42", "LGTM"), _parse_add_comment_args(["42", "LGTM"]))
+        self.assertEqual(
+            ("42", "ship it now"),
+            _parse_add_comment_args(["42", "ship", "it", "now"]),
+        )
+        self.assertEqual(
+            ("42", "--- a rule"), _parse_add_comment_args(["42", "---", "a", "rule"])
+        )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            [],
+            ["42"],
+            ["42", "   "],
+            ["abc", "text"],
+            ["--text", "hi"],
+            ["42", "--file", "notes.md"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_add_comment_args(args)
+
+
+class PipelinesArgumentsTest(unittest.TestCase):
+    def test_parses_count_with_a_default(self):
+        self.assertEqual(10, _parse_pipelines_args([]))
+        self.assertEqual(25, _parse_pipelines_args(["25"]))
+
+    def test_rejects_invalid_arguments(self):
+        cases = [["many"], ["0"], ["-5"], ["101"], ["--unknown"], ["10", "20"]]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_pipelines_args(args)
+
+
+class SinglePositionalArgumentsTest(unittest.TestCase):
+    def test_accepts_exactly_one_identifier(self):
+        self.assertEqual("42", _single_pr_id("get-pr", ["42"]))
+        self.assertEqual(
+            "d4a04f6c", _single_positional("pipeline-steps", ["d4a04f6c"], "PIPELINE_ID")
+        )
+
+    def test_rejects_missing_extra_and_non_numeric_identifiers(self):
+        pr_id_cases = [
+            [],
+            ["--current-branch"],
+            ["42", "43"],
+            ["abc"],
+            ["0"],
+            ["https://bitbucket.org/acme/widgets/pull-requests/42"],
+        ]
+        for args in pr_id_cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _single_pr_id("get-pr", args)
+
+        for args in ([], ["--full"], ["a", "b"]):
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _single_positional("pipeline-steps", args, "PIPELINE_ID")
+
+
+class CommandDispatchTest(unittest.TestCase):
+    """Every command must reject what it does not understand."""
+
+    def _run(self, argv):
+        stderr = io.StringIO()
+        with patch("bitbucket_api.load_config",
+                   return_value={"workspace": "acme", "repo_slug": "widgets"}), \
+                patch("bitbucket_api.api_request") as api_request, \
+                patch.object(sys, "argv", ["bitbucket_api.py"] + argv), \
+                redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            try:
+                main()
+                code = 0
+            except SystemExit as exit_error:
+                code = exit_error.code
+        return code, stderr.getvalue(), api_request.call_count
+
+    def test_every_command_reports_an_unknown_flag_without_calling_the_api(self):
+        for command in COMMANDS:
+            with self.subTest(command=command):
+                code, stderr, api_calls = self._run([command, "--bogus-flag"])
+
+                self.assertEqual(1, code)
+                self.assertIn(command, stderr)
+                self.assertNotIn("unknown command", stderr)
+                self.assertEqual(0, api_calls)
+
+    def test_unknown_command_is_reported_on_stderr(self):
+        code, stderr, api_calls = self._run(["make-pr"])
+
+        self.assertEqual(1, code)
+        self.assertIn("unknown command: make-pr", stderr)
+        self.assertIn("Usage:", stderr)
+        self.assertEqual(0, api_calls)
+
+    def test_help_prints_usage_and_succeeds(self):
+        for flag in ("help", "--help", "-h"):
+            with self.subTest(flag=flag):
+                self.assertEqual(0, self._run([flag])[0])
+
+
 class LogReadingTest(unittest.TestCase):
     def test_retains_only_requested_tail_while_counting_all_lines(self):
         total, lines = _read_log_lines(
@@ -280,17 +516,25 @@ class PipelineLogDownloadTest(unittest.TestCase):
 
 class PipelineLogArgumentsTest(unittest.TestCase):
     def test_parses_step_lines_and_full_options(self):
-        self.assertEqual(("abc", 25), _parse_pipeline_log_args(["abc", "--lines", "25"]))
-        self.assertEqual((None, None), _parse_pipeline_log_args(["--full"]))
+        self.assertEqual(
+            ("d4a04f6c", "abc", 25),
+            _parse_pipeline_log_args(["d4a04f6c", "abc", "--lines", "25"]),
+        )
+        self.assertEqual(
+            ("d4a04f6c", None, None), _parse_pipeline_log_args(["d4a04f6c", "--full"])
+        )
 
     def test_rejects_invalid_arguments(self):
         cases = [
-            ["--lines"],
-            ["--lines", "many"],
-            ["--lines", "0"],
-            ["--lines", "-1"],
-            ["--unknown"],
-            ["first", "second"],
+            [],
+            ["--full"],
+            ["p", "--lines"],
+            ["p", "--lines", "--full"],
+            ["p", "--lines", "many"],
+            ["p", "--lines", "0"],
+            ["p", "--lines", "-1"],
+            ["p", "--unknown"],
+            ["p", "first", "second"],
         ]
         for args in cases:
             with self.subTest(args=args):

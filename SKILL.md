@@ -92,6 +92,15 @@ All commands are run via Bash tool:
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" <command> [args]
 ```
 
+**Argument validation** — every command checks its own arguments and exits with
+a specific error before any API call. Unknown flags, a flag missing its value
+(or given the next flag as its value), extra positionals, a non-numeric PR ID,
+an unknown merge strategy, and an out-of-range `COUNT` are all rejected;
+nothing is silently ignored, so a typo can never produce a PR with a missing
+description or a merge with the wrong strategy. If a command errors on its
+arguments, fix the invocation — do not work around it with a raw `curl`. Run
+with no arguments (or `help`) for usage.
+
 ### Create Pull Request
 
 **Trigger**: `/bitbucket create-pr`, `/bitbucket pr`, "create PR", "open pull request"
@@ -100,11 +109,16 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" <command> [args]
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" create-pr "fix: IB-123: fix customer grid" --description "Summary of changes" --destination master
 ```
 
-- `--description TEXT` — PR description (markdown)
+- `--description TEXT` — PR description (markdown), or use `--description-file PATH`
+  for longer content (write it to a temp file first — a full description is
+  typically too long/multiline for a single `--description` argument)
 - `--source BRANCH` — source branch (default: current branch)
 - `--destination BRANCH` — target branch (default: master)
 - `--no-close` — don't close source branch after merge
 - Returns: PR number and URL
+
+The title must be a single quoted argument: `create-pr fix: IB-123: fix grid`
+is rejected rather than silently truncated to `fix:`.
 
 ### List Pull Requests
 
@@ -143,7 +157,8 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" pr-commits 123
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --strategy squash
 ```
 
-- `--strategy`: `merge_commit` (default), `squash`, `fast_forward`
+- `--strategy`: `merge_commit` (default), `squash`, `fast_forward` — any other
+  value is rejected locally instead of merging with the default strategy
 
 ### Approve Pull Request
 
@@ -187,6 +202,7 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" update-pr 123 --title "fix: IB-101: 
 - `--title TEXT` — new PR title
 - `--description TEXT` — new PR description (markdown), or use `--description-file PATH` for longer content
 - At least one of `--title`/`--description`/`--description-file` must be given
+- `--description` and `--description-file` are mutually exclusive
 
 ### Prettify PR (regenerate title & description from its commits)
 
@@ -214,6 +230,10 @@ and **PR Description Formatting** below, then apply with `update-pr`:
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 "LGTM! Ready to merge."
 ```
 
+- Everything after the ID becomes the comment body (unquoted words are joined),
+  so quote the text. `add-comment` takes no options — an option-shaped first
+  word is treated as a typo rather than posted as a comment.
+
 ### Pipelines
 
 **Trigger**: `/bitbucket pipelines`
@@ -222,7 +242,9 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 "LGTM! Ready to merg
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipelines [COUNT]
 ```
 
-- COUNT: number of recent pipelines to show (default: 10)
+- COUNT: number of recent pipelines to show, 1–100 (default: 10). The listing
+  is a single API page, so a larger number is rejected rather than quietly
+  capped at 100.
 
 **Status interpretation** — the Status column is `STATE/RESULT-or-STAGE`:
 - `COMPLETED/SUCCESSFUL`, `COMPLETED/FAILED` — terminal results.
