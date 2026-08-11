@@ -22,6 +22,7 @@ from bitbucket_api import (
     _parse_merge_pr_args,
     _parse_pipeline_log_args,
     _parse_pipelines_args,
+    _parse_run_pipeline_args,
     _parse_update_pr_args,
     _read_log_lines,
     _single_positional,
@@ -29,6 +30,7 @@ from bitbucket_api import (
     cmd_approve_pr,
     cmd_list_prs,
     cmd_pr_commits,
+    cmd_run_pipeline,
     main,
 )
 
@@ -387,6 +389,106 @@ class PipelinesArgumentsTest(unittest.TestCase):
             with self.subTest(args=args):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     _parse_pipelines_args(args)
+
+
+class RunPipelineArgumentsTest(unittest.TestCase):
+    def test_parses_branch_custom_pattern_and_repeated_variables(self):
+        self.assertEqual((None, None, []), _parse_run_pipeline_args([]))
+        self.assertEqual(
+            ("release/1.2", "deploy-to-production",
+             [{"key": "ENV", "value": "prod"}, {"key": "DRY_RUN", "value": ""}]),
+            _parse_run_pipeline_args([
+                "--branch", "release/1.2",
+                "--custom", "deploy-to-production",
+                "--variable", "ENV=prod",
+                "--variable", "DRY_RUN=",
+            ]),
+        )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            ["--branch"],
+            ["--custom"],
+            ["--custom", "--variable"],
+            ["--variable"],
+            ["--variable", "ENV"],
+            ["--variable", "=prod"],
+            ["--unknown"],
+            ["deploy-to-production"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_run_pipeline_args(args)
+
+
+class RunPipelineCommandTest(unittest.TestCase):
+    CONFIG = {"workspace": "acme", "repo_slug": "widgets"}
+
+    @patch("bitbucket_api.api_request")
+    def test_posts_a_custom_selector_with_variables(self, api_request):
+        api_request.return_value = {
+            "uuid": "{d4a04f6c-1111-2222-3333-444455556666}",
+            "build_number": 77,
+            "state": {"name": "PENDING"},
+        }
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_run_pipeline(
+                self.CONFIG,
+                "release/1.2",
+                "deploy-to-production",
+                [{"key": "ENV", "value": "prod"}],
+            )
+
+        api_request.assert_called_once_with(
+            self.CONFIG,
+            "/pipelines/",
+            method="POST",
+            data={
+                "target": {
+                    "type": "pipeline_ref_target",
+                    "ref_type": "branch",
+                    "ref_name": "release/1.2",
+                    "selector": {"type": "custom", "pattern": "deploy-to-production"},
+                },
+                "variables": [{"key": "ENV", "value": "prod"}],
+            },
+        )
+        output = stdout.getvalue()
+        self.assertIn("deploy-to-production", output)
+        self.assertIn("Pipeline #77 (PENDING)", output)
+        self.assertIn("pipelines/results/77", output)
+        self.assertIn("pipeline-steps d4a04f6c", output)
+
+    @patch("bitbucket_api.api_request")
+    @patch("bitbucket_api._git", return_value="feature/current")
+    def test_defaults_to_the_current_branch_and_omits_the_selector(
+            self, _git, api_request):
+        api_request.return_value = {"uuid": "{abc}", "build_number": 1}
+
+        with redirect_stdout(io.StringIO()):
+            cmd_run_pipeline(self.CONFIG)
+
+        self.assertEqual(
+            {
+                "target": {
+                    "type": "pipeline_ref_target",
+                    "ref_type": "branch",
+                    "ref_name": "feature/current",
+                }
+            },
+            api_request.call_args.kwargs["data"],
+        )
+
+    @patch("bitbucket_api.api_request")
+    @patch("bitbucket_api._git", return_value="")
+    def test_fails_when_the_branch_cannot_be_determined(self, _git, api_request):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cmd_run_pipeline(self.CONFIG)
+
+        api_request.assert_not_called()
 
 
 class SinglePositionalArgumentsTest(unittest.TestCase):
