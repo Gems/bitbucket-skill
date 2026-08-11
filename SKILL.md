@@ -2,12 +2,13 @@
 name: bitbucket
 description: >
   Interact with Bitbucket — create PRs, list PRs, view PR details, update a PR's title/description, approve, merge,
-  decline, read comments, view pipelines, CI-gated merge (poll the PR pipeline and merge when green), code review with
-  inline comments, manage environments and variables. Use when user says "/bitbucket pr", "/bitbucket create-pr",
-  "/bitbucket list-prs", "/bitbucket approve-pr", "approve PR", "/bitbucket pipelines",
-  "/bitbucket merge-when-green", "/bitbucket ship", "/bitbucket prettify-pr", "prettify PR", asks to open a PR and get
-  it merged once CI passes / merge when the pipeline is green, asks to regenerate/clean up/fix a PR's title or
-  description from its commits, or similar Bitbucket-related requests.
+  decline, read comments, view and trigger pipelines, CI-gated merge (poll the PR pipeline and merge when green), code
+  review with inline comments, manage environments and variables. Use when user says "/bitbucket pr",
+  "/bitbucket create-pr", "/bitbucket list-prs", "/bitbucket approve-pr", "approve PR", "/bitbucket pipelines",
+  "/bitbucket run-pipeline", "run the pipeline", "trigger a build", "/bitbucket merge-when-green", "/bitbucket ship",
+  "/bitbucket prettify-pr", "prettify PR", asks to open a PR and get it merged once CI passes / merge when the pipeline
+  is green, asks to regenerate/clean up/fix a PR's title or description from its commits, or similar Bitbucket-related
+  requests.
 argument-hint: "[command] [args]"
 allowed-tools: Bash(python3 *), Bash(*.claude/skills/bitbucket/scripts/*), Bash(*.agents/skills/bitbucket/scripts/*), Bash(*.codex/skills/bitbucket/scripts/*)
 ---
@@ -251,6 +252,29 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipelines [COUNT]
 - `IN_PROGRESS/PAUSED` (or `/HALTED`) — **not running**: the pipeline succeeded up to a manual trigger step and is waiting for a human. Its Duration is wall-clock since the pause, so do **not** report it as "stuck", "slow", or "still building". Read it as "built OK, awaiting manual trigger".
 - `IN_PROGRESS` with no stage — genuinely executing.
 - For per-step detail and **why** a pipeline failed, use `pipeline-steps` below rather than hand-rolling API calls.
+
+### Run Pipeline (trigger a build)
+
+**Trigger**: `/bitbucket run-pipeline`, "run the pipeline", "trigger a build", "run the deploy pipeline"
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" run-pipeline
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" run-pipeline --branch release/1.2 --custom deploy-to-production --variable ENV=prod
+```
+
+- `--branch BRANCH` — branch to run on (default: current branch)
+- `--custom PATTERN` — run the named `pipelines.custom.<PATTERN>` definition.
+  Without it, the branch's own definition runs (the same one a push triggers).
+- `--variable KEY=VALUE` — repeatable; passed to the run as a pipeline
+  variable. Values are sent unsecured, so never pass a secret this way — put
+  it in a repository/deployment variable and reference it from the YAML.
+- Prints the build number, state, short id, and result URL, then the
+  `pipeline-steps <id>` command to follow it.
+
+Only run this when the user asks for it. A pipeline consumes build minutes and
+a custom pipeline is frequently a **deploy** — confirm the branch and pattern
+with the user before triggering one that ships anything, and never trigger a
+pipeline as an unrequested step of another procedure.
 
 ### Pipeline Steps (why a pipeline failed)
 

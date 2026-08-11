@@ -102,6 +102,7 @@ Once installed, use the `/bitbucket` command in your coding agent:
 /bitbucket merge-pr 123  — Merge a PR
 /bitbucket pr-comments 123 — View PR comments
 /bitbucket pipelines     — View recent pipelines
+/bitbucket run-pipeline  — Trigger a pipeline on a branch
 ```
 
 Or use natural language:

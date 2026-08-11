@@ -824,6 +824,78 @@ def cmd_pipelines(config, count=10):
         print(f"| {uuid} | {branch} | {status} | {dur_str} | {trigger} | {created} |")
 
 
+def _parse_pipeline_variable(value):
+    key, separator, variable_value = value.partition("=")
+    if not separator or not key.strip():
+        _fail(f"--variable requires KEY=VALUE, got {value!r}")
+    return {"key": key.strip(), "value": variable_value}
+
+
+def _parse_run_pipeline_args(args):
+    branch = None
+    pattern = None
+    variables = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--branch":
+            branch = _option_value(args, index, "a branch")
+            index += 2
+        elif arg == "--custom":
+            pattern = _option_value(args, index, "a custom pipeline name")
+            index += 2
+        elif arg == "--variable":
+            variables.append(
+                _parse_pipeline_variable(_option_value(args, index, "KEY=VALUE"))
+            )
+            index += 2
+        elif _looks_like_option(arg):
+            _fail(f"unknown run-pipeline option: {arg}")
+        else:
+            _fail(
+                f"unexpected run-pipeline argument: {arg!r} "
+                "(name a custom pipeline with --custom PATTERN)"
+            )
+    return branch, pattern, variables
+
+
+def cmd_run_pipeline(config, branch=None, pattern=None, variables=None):
+    """Trigger a pipeline run on a branch."""
+    if not branch:
+        branch = _git("branch", "--show-current")
+        if not branch:
+            _fail("could not determine the current branch")
+
+    target = {
+        "type": "pipeline_ref_target",
+        "ref_type": "branch",
+        "ref_name": branch,
+    }
+    # Without a selector the branch's default definition runs; a custom
+    # pipeline is only reachable through an explicit custom selector.
+    if pattern:
+        target["selector"] = {"type": "custom", "pattern": pattern}
+    payload = {"target": target}
+    if variables:
+        payload["variables"] = variables
+
+    result = api_request(config, "/pipelines/", method="POST", data=payload)
+    uuid = result.get("uuid", "").strip("{}")
+    build_number = result.get("build_number", "—")
+    state = result.get("state", {}).get("name", "—")
+    kind = f"custom pipeline '{pattern}'" if pattern else "default pipeline"
+
+    print(f"Started {kind} on {branch}")
+    print(f"Pipeline #{build_number} ({state}) — id {uuid[:8]}")
+    print(
+        f"URL: https://bitbucket.org/{config['workspace']}/{config['repo_slug']}"
+        f"/pipelines/results/{build_number}"
+    )
+    if uuid:
+        print(f"\nFollow with: pipeline-steps {uuid[:8]}")
+    return result
+
+
 USAGE = """Usage: bitbucket_api.py <command> [args]
 
 Commands:
@@ -842,6 +914,8 @@ Commands:
   pr-comments <ID>                   List PR comments
   add-comment <ID> <TEXT>            Add comment to PR
   pipelines [COUNT]                  List recent pipelines
+  run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]
+                                     Trigger a pipeline (default: the branch's own definition)
   pipeline-steps <PIPELINE_ID>       List steps + failure reason for a pipeline (full or short uuid)
   pipeline-log <PIPELINE_ID> [STEP_ID] [--lines N] [--full]
                                      Fetch a step's log (defaults to the first FAILED step, last N lines)"""
@@ -850,7 +924,7 @@ Commands:
 COMMANDS = (
     "create-pr", "list-prs", "get-pr", "pr-commits", "update-pr", "merge-pr",
     "approve-pr", "decline-pr", "pr-comments", "add-comment", "pipelines",
-    "pipeline-steps", "pipeline-log",
+    "run-pipeline", "pipeline-steps", "pipeline-log",
 )
 
 
@@ -930,6 +1004,10 @@ def main():
 
     elif cmd == "pipelines":
         cmd_pipelines(config, _parse_pipelines_args(args))
+
+    elif cmd == "run-pipeline":
+        branch, pattern, variables = _parse_run_pipeline_args(args)
+        cmd_run_pipeline(config, branch, pattern, variables)
 
     elif cmd == "pipeline-steps":
         cmd_pipeline_steps(config, _single_positional(cmd, args, "PIPELINE_ID"))

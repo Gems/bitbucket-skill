@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `approve-pr <ID>`: approves a PR via `POST /pullrequests/{id}/approve` as the account behind the configured credential, printing the approving user and resulting participant state. SKILL.md documents it as explicit-request-only — an approval is team-visible and counts toward merge checks, so it is never a step of another procedure.
 - `create-pr`: `--description-file PATH`, matching `update-pr`, so a full description no longer has to fit in a single shell argument.
+- `run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]`: triggers a pipeline via `POST /pipelines/`, closing the read-only gap left by `pipelines`/`pipeline-steps`/`pipeline-log`. Defaults to the current branch and its own definition; `--custom` selects a `pipelines.custom.<PATTERN>` definition and `--variable` is repeatable. Prints the build number, state, short id, and result URL, plus the `pipeline-steps <id>` command to follow it. SKILL.md documents it as explicit-request-only, since a custom pipeline is frequently a deploy.
 
 ### Fixed
 
