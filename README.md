@@ -102,6 +102,7 @@ Once installed, use the `/bitbucket` command in your coding agent:
 /bitbucket merge-pr 123  — Merge a PR
 /bitbucket pr-comments 123 — View PR comments
 /bitbucket pipelines     — View recent pipelines
+/bitbucket pipeline 1333 — View one run by build number (or uuid), with its steps
 /bitbucket run-pipeline  — Trigger a pipeline on a branch
 ```
 
@@ -111,6 +112,7 @@ Or use natural language:
 "Create a PR for the current branch"
 "Show me open pull requests"
 "Merge PR #42 with squash strategy"
+"What happened in build 1333?"
 ```
 
 ## Requirements

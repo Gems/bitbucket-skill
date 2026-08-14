@@ -14,6 +14,7 @@ from bitbucket_api import (
     COMMANDS,
     _NoRedirect,
     _config_paths,
+    _fetch_pipeline,
     _fetch_pipeline_log,
     _paginated_values,
     _parse_add_comment_args,
@@ -25,10 +26,12 @@ from bitbucket_api import (
     _parse_run_pipeline_args,
     _parse_update_pr_args,
     _read_log_lines,
+    _resolve_pipeline_uuid,
     _single_positional,
     _single_pr_id,
     cmd_approve_pr,
     cmd_list_prs,
+    cmd_pipeline,
     cmd_pr_commits,
     cmd_run_pipeline,
     main,
@@ -460,7 +463,10 @@ class RunPipelineCommandTest(unittest.TestCase):
         self.assertIn("deploy-to-production", output)
         self.assertIn("Pipeline #77 (PENDING)", output)
         self.assertIn("pipelines/results/77", output)
-        self.assertIn("pipeline-steps d4a04f6c", output)
+        # The full uuid, so the follow-up command needs no lookup.
+        self.assertIn(
+            "pipeline-steps d4a04f6c-1111-2222-3333-444455556666", output
+        )
 
     @patch("bitbucket_api.api_request")
     @patch("bitbucket_api._git", return_value="feature/current")
@@ -489,6 +495,161 @@ class RunPipelineCommandTest(unittest.TestCase):
             cmd_run_pipeline(self.CONFIG)
 
         api_request.assert_not_called()
+
+
+class PipelineIdResolutionTest(unittest.TestCase):
+    CONFIG = {"workspace": "acme", "repo_slug": "widgets"}
+    RUN = {"uuid": "{d4a04f6c-1111-2222-3333-444455556666}", "build_number": 1333}
+
+    @patch("bitbucket_api.api_request")
+    def test_resolves_a_build_number_with_or_without_a_hash(self, api_request):
+        for pipeline_id in ("1333", "#1333", " #1333 "):
+            with self.subTest(pipeline_id=pipeline_id):
+                api_request.reset_mock()
+                api_request.return_value = self.RUN
+
+                self.assertEqual(self.RUN, _fetch_pipeline(self.CONFIG, pipeline_id))
+                api_request.assert_called_once_with(
+                    self.CONFIG, "/pipelines/1333", allow_404=True
+                )
+
+    @patch("bitbucket_api.api_request")
+    def test_falls_back_to_the_recent_listing_when_the_number_is_not_resolved(
+            self, api_request):
+        api_request.side_effect = [None, {"values": [self.RUN]}]
+
+        self.assertEqual(self.RUN, _fetch_pipeline(self.CONFIG, "#1333"))
+        self.assertEqual(
+            "/pipelines/?pagelen=100&sort=-created_on",
+            api_request.call_args.args[1],
+        )
+
+    @patch("bitbucket_api.api_request")
+    def test_an_all_digit_id_can_still_match_a_uuid_prefix(self, api_request):
+        run = {"uuid": "{13330000-1111-2222-3333-444455556666}", "build_number": 7}
+        api_request.side_effect = [None, {"values": [run]}]
+
+        self.assertEqual(run, _fetch_pipeline(self.CONFIG, "1333"))
+
+    @patch("bitbucket_api.api_request")
+    def test_resolves_a_short_uuid_from_the_recent_listing(self, api_request):
+        api_request.return_value = {"values": [self.RUN]}
+
+        self.assertEqual(self.RUN, _fetch_pipeline(self.CONFIG, "d4a04f6c"))
+        api_request.assert_called_once_with(
+            self.CONFIG, "/pipelines/?pagelen=100&sort=-created_on"
+        )
+
+    @patch("bitbucket_api.api_request")
+    def test_a_full_uuid_needs_no_lookup(self, api_request):
+        uuid = "d4a04f6c-1111-2222-3333-444455556666"
+
+        for pipeline_id in (uuid, f"{{{uuid}}}", uuid.upper()):
+            with self.subTest(pipeline_id=pipeline_id):
+                self.assertEqual(
+                    f"{{{uuid}}}", _resolve_pipeline_uuid(self.CONFIG, pipeline_id)
+                )
+        api_request.assert_not_called()
+
+    @patch("bitbucket_api.api_request")
+    def test_a_full_uuid_is_fetched_directly_without_scanning_the_listing(
+            self, api_request):
+        uuid = "d4a04f6c-1111-2222-3333-444455556666"
+        api_request.return_value = self.RUN
+
+        self.assertEqual(self.RUN, _fetch_pipeline(self.CONFIG, uuid))
+        api_request.assert_called_once_with(self.CONFIG, f"/pipelines/{{{uuid}}}")
+
+    @patch("bitbucket_api.api_request")
+    def test_reports_an_unknown_build_number(self, api_request):
+        api_request.side_effect = [None, {"values": [self.RUN]}]
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            _fetch_pipeline(self.CONFIG, "#9999")
+
+        self.assertIn("build #9999", stderr.getvalue())
+
+
+class PipelineCommandTest(unittest.TestCase):
+    CONFIG = {"workspace": "acme", "repo_slug": "widgets"}
+    RUN = {
+        "uuid": "{d4a04f6c-1111-2222-3333-444455556666}",
+        "build_number": 1333,
+        "state": {"name": "COMPLETED", "result": {"name": "FAILED"}},
+        "target": {
+            "type": "pipeline_ref_target",
+            "ref_name": "feature/IB-123",
+            "commit": {"hash": "abcdef1234567890"},
+            "selector": {"type": "custom", "pattern": "deploy"},
+        },
+        "trigger": {"name": "PUSH"},
+        "creator": {"display_name": "Ann Dev"},
+        "created_on": "2026-08-14T09:12:33.000Z",
+        "completed_on": "2026-08-14T09:16:45.000Z",
+        "duration_in_seconds": 252,
+    }
+    STEPS = [
+        {
+            "uuid": "{aaaa1111-...}",
+            "name": "Build",
+            "state": {
+                "name": "COMPLETED",
+                "result": {
+                    "name": "FAILED",
+                    "error": {"message": "Container 'build' exceeded memory limit."},
+                },
+            },
+        }
+    ]
+
+    @patch("bitbucket_api._paginated_values")
+    @patch("bitbucket_api.api_request")
+    def test_reports_the_run_its_steps_and_the_log_follow_up(
+            self, api_request, paginated_values):
+        api_request.return_value = self.RUN
+        paginated_values.return_value = self.STEPS
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_pipeline(self.CONFIG, "#1333")
+
+        output = stdout.getvalue()
+        self.assertIn("## Pipeline #1333 — COMPLETED/FAILED", output)
+        self.assertIn("Branch: feature/IB-123 | Commit: abcdef123456", output)
+        self.assertIn("Custom pipeline: deploy", output)
+        self.assertIn("Trigger: PUSH | By: Ann Dev", output)
+        self.assertIn("Duration: 4m 12s", output)
+        self.assertIn(
+            "URL: https://bitbucket.org/acme/widgets/pipelines/results/1333", output
+        )
+        # The full uuid, so a follow-up command resolves with no lookup.
+        self.assertIn("Id: d4a04f6c-1111-2222-3333-444455556666", output)
+        self.assertIn("Container 'build' exceeded memory limit.", output)
+        self.assertIn(
+            "pipeline-log d4a04f6c-1111-2222-3333-444455556666", output
+        )
+        paginated_values.assert_called_once_with(
+            self.CONFIG,
+            "/pipelines/{d4a04f6c-1111-2222-3333-444455556666}/steps/?pagelen=100",
+        )
+
+    @patch("bitbucket_api._paginated_values", return_value=[])
+    @patch("bitbucket_api.api_request")
+    def test_omits_the_log_follow_up_when_no_step_failed(
+            self, api_request, paginated_values):
+        api_request.return_value = dict(
+            self.RUN, state={"name": "IN_PROGRESS", "stage": {"name": "PAUSED"}}
+        )
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_pipeline(self.CONFIG, "1333")
+
+        output = stdout.getvalue()
+        self.assertIn("## Pipeline #1333 — IN_PROGRESS/PAUSED", output)
+        self.assertIn("No steps found.", output)
+        self.assertNotIn("pipeline-log", output)
 
 
 class SinglePositionalArgumentsTest(unittest.TestCase):

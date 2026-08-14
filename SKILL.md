@@ -5,7 +5,8 @@ description: >
   decline, read comments, view and trigger pipelines, CI-gated merge (poll the PR pipeline and merge when green), code
   review with inline comments, manage environments and variables. Use when user says "/bitbucket pr",
   "/bitbucket create-pr", "/bitbucket list-prs", "/bitbucket approve-pr", "approve PR", "/bitbucket pipelines",
-  "/bitbucket run-pipeline", "run the pipeline", "trigger a build", "/bitbucket merge-when-green", "/bitbucket ship",
+  "/bitbucket run-pipeline", "run the pipeline", "trigger a build", "/bitbucket pipeline 1333", asks what happened in a
+  build / pipeline named by its number ("check build #1333"), "/bitbucket merge-when-green", "/bitbucket ship",
   "/bitbucket prettify-pr", "prettify PR", asks to open a PR and get it merged once CI passes / merge when the pipeline
   is green, asks to regenerate/clean up/fix a PR's title or description from its commits, or similar Bitbucket-related
   requests.
@@ -246,12 +247,65 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipelines [COUNT]
 - COUNT: number of recent pipelines to show, 1–100 (default: 10). The listing
   is a single API page, so a larger number is rejected rather than quietly
   capped at 100.
+- Each row carries both identifiers: `Build` (the `#1333` number Bitbucket
+  shows in its UI) and `Id` (the short uuid). Either one names the run in
+  every command below.
 
 **Status interpretation** — the Status column is `STATE/RESULT-or-STAGE`:
 - `COMPLETED/SUCCESSFUL`, `COMPLETED/FAILED` — terminal results.
 - `IN_PROGRESS/PAUSED` (or `/HALTED`) — **not running**: the pipeline succeeded up to a manual trigger step and is waiting for a human. Its Duration is wall-clock since the pause, so do **not** report it as "stuck", "slow", or "still building". Read it as "built OK, awaiting manual trigger".
 - `IN_PROGRESS` with no stage — genuinely executing.
-- For per-step detail and **why** a pipeline failed, use `pipeline-steps` below rather than hand-rolling API calls.
+- For per-step detail and **why** a pipeline failed, use `pipeline` or
+  `pipeline-steps` below rather than hand-rolling API calls.
+
+### View Pipeline Run (by build number)
+
+**Trigger**: `/bitbucket pipeline <PIPELINE_ID>`, "what happened in build #1333", "check pipeline 1333", "status of that build", a pasted `.../pipelines/results/1333` URL
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipeline 1333
+```
+
+Use this whenever a **build number** is what you have — from the user, from a
+chat message, from a `pipelines` row, or from the tail of a Bitbucket
+`/pipelines/results/<N>` URL. It is one call: no listing scan, no uuid lookup.
+
+- `PIPELINE_ID` is the build number (`1333`) or a pipeline uuid.
+- Write the number **without** `#`, or quote it (`'#1333'`): an unquoted `#`
+  starts a shell comment and the argument never reaches the script.
+- Prints status, branch, commit, PR number (for a PR run), custom-pipeline
+  pattern, trigger, creator, created/finished times, duration, the run's web
+  URL and its **full uuid** on the `Id:` line — then the same per-step table
+  as `pipeline-steps`, including each step's structured failure reason.
+- When a step failed it prints the `pipeline-log <uuid>` follow-up to read.
+- Unknown number → `no pipeline found for build #N ...`. Don't retry with a
+  raw `curl`; check the number.
+
+### Naming a run: build number in, uuid onward
+
+Every pipeline command (`pipeline`, `pipeline-steps`, `pipeline-log`) takes
+the same `PIPELINE_ID`, but the three forms do **not** cost the same:
+
+| Form | Example | Cost to resolve |
+|------|---------|-----------------|
+| Full uuid | `d4a04f6c-1111-2222-3333-444455556666` | **none** — it is the API path (braces and case optional) |
+| Build number | `1333` | one direct request |
+| Short id (8 chars) | `d4a04f6c` | scans the last 100 runs; older runs are unreachable |
+
+So the working order is:
+
+1. The user hands you a **build number** (or a `/pipelines/results/1333` URL) —
+   run `pipeline 1333`.
+2. Take the **full uuid** off that output's `Id:` line (`run-pipeline` prints
+   the same uuid for a run it just started).
+3. Use that uuid for every follow-up in the conversation —
+   `pipeline-steps <uuid>`, `pipeline-log <uuid>` — it resolves for free.
+
+Keep the uuid in mind for the rest of the conversation and stop re-sending the
+number. Never re-derive an id by listing pipelines and eyeballing the table:
+that is the one path that both costs a request and silently misses old runs.
+The short `Id` column in the `pipelines` listing is for reading, not for
+passing on — take that row's `Build` number instead.
 
 ### Run Pipeline (trigger a build)
 
@@ -268,8 +322,9 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" run-pipeline --branch release/1.2 --
 - `--variable KEY=VALUE` — repeatable; passed to the run as a pipeline
   variable. Values are sent unsecured, so never pass a secret this way — put
   it in a repository/deployment variable and reference it from the YAML.
-- Prints the build number, state, short id, and result URL, then the
-  `pipeline-steps <id>` command to follow it.
+- Prints the build number, state, full uuid, and result URL, then the
+  `pipeline-steps <uuid>` command to follow it — keep that uuid for any
+  further check on this run.
 
 Only run this when the user asks for it. A pipeline consumes build minutes and
 a custom pipeline is frequently a **deploy** — confirm the branch and pattern
@@ -284,8 +339,9 @@ pipeline as an unrequested step of another procedure.
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipeline-steps d4a04f6c
 ```
 
-- `PIPELINE_ID` accepts the short id shown in the `pipelines` table (first 8
-  chars) or a full/braced uuid — no manual uuid lookup needed.
+- `PIPELINE_ID` accepts the build number (`1333`), a full/braced uuid, or the
+  short id shown in the `pipelines` table (first 8 chars) — see the cost table
+  above and prefer a uuid you already have.
 - Lists each step's name/state/result **and** the structured failure reason
   (e.g. `Container 'build' exceeded memory limit.` for an OOM kill). Check
   this before diving into logs — infra-level failures (OOM, timeout) surface
@@ -300,6 +356,8 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipeline-steps d4a04f6c
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" pipeline-log d4a04f6c [--lines N] [--full]
 ```
 
+- `PIPELINE_ID` accepts a build number or a short/full uuid, same as above.
+  Pass the full uuid when a previous command already printed it.
 - `STEP_ID` optional — defaults to the first `FAILED` step (falls back to the
   last step if none failed). Also accepts a short id from `pipeline-steps`.
 - Defaults to the last 200 lines; use `--lines N` or `--full` for more.
