@@ -140,6 +140,12 @@ curl -u "$USER:$PASS" \
   "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pipelines/{pipeline_uuid}"
 ```
 
+The same path also resolves a build number — the `#1333` shown in the UI:
+```bash
+curl -u "$USER:$PASS" \
+  "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pipelines/1333"
+```
+
 ### List Pipelines
 ```bash
 curl -u "$USER:$PASS" \

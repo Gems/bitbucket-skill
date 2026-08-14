@@ -11,7 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `approve-pr <ID>`: approves a PR via `POST /pullrequests/{id}/approve` as the account behind the configured credential, printing the approving user and resulting participant state. SKILL.md documents it as explicit-request-only — an approval is team-visible and counts toward merge checks, so it is never a step of another procedure.
 - `create-pr`: `--description-file PATH`, matching `update-pr`, so a full description no longer has to fit in a single shell argument.
-- `run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]`: triggers a pipeline via `POST /pipelines/`, closing the read-only gap left by `pipelines`/`pipeline-steps`/`pipeline-log`. Defaults to the current branch and its own definition; `--custom` selects a `pipelines.custom.<PATTERN>` definition and `--variable` is repeatable. Prints the build number, state, short id, and result URL, plus the `pipeline-steps <id>` command to follow it. SKILL.md documents it as explicit-request-only, since a custom pipeline is frequently a deploy.
+- `pipeline <PIPELINE_ID>`: shows a single run — status, branch, commit, PR number, custom-pipeline pattern, trigger, creator, timings, duration, result URL and full uuid — followed by its step table with each step's structured failure reason, and the `pipeline-log <uuid>` follow-up when a step failed. Takes the `#1333` build number Bitbucket shows in its UI and in `run-pipeline` output, so a number from a chat message or a `/pipelines/results/<N>` URL resolves in one call instead of a listing scan plus a uuid lookup.
+- Build numbers are accepted wherever a run is named: `pipeline-steps 1333` and `pipeline-log 1333` resolve them too. A number is looked up directly, falling back to the recent-runs listing — which also keeps an all-digit uuid prefix working.
+- `pipeline` and `run-pipeline` print the run's full uuid rather than its 8-char prefix, and word their follow-up hints in terms of it: a uuid is the API path itself, so a follow-up command resolves it without any lookup, while a short id costs a 100-run listing scan and cannot reach older runs. SKILL.md documents the resulting order — resolve a build number once, then carry the uuid through the conversation.
+- `pipelines`: the listing now carries a `Build` column alongside the short id, so the number needed by the commands above is visible without opening Bitbucket.
+- `run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]`: triggers a pipeline via `POST /pipelines/`, closing the read-only gap left by `pipelines`/`pipeline-steps`/`pipeline-log`. Defaults to the current branch and its own definition; `--custom` selects a `pipelines.custom.<PATTERN>` definition and `--variable` is repeatable. Prints the build number, state, uuid, and result URL, plus the `pipeline-steps <uuid>` command to follow it. SKILL.md documents it as explicit-request-only, since a custom pipeline is frequently a deploy.
 
 ### Fixed
 
@@ -23,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--strategy` is checked against `merge_commit`/`squash`/`fast_forward`, `pipelines COUNT` against the API's 1–100 page cap, and `list-prs STATE` reports the valid states.
   - Unreadable `--description-file` paths report the OS error instead of raising a traceback; `--description` and `--description-file` together are rejected.
   - An unknown command prints `Error: unknown command: X` plus usage on stderr; `help`/`--help`/`-h` print usage and exit 0 without needing a config file.
+- `pipelines`: the short id column no longer prints a leading `{` in place of the uuid's 8th character, so a value copied from the listing is the uuid's actual first 8 characters.
 
 ## [0.0.6] - 2026-06-19
 
