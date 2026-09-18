@@ -334,9 +334,41 @@ class UpdatePullRequestArgumentsTest(unittest.TestCase):
 
 class MergePullRequestArgumentsTest(unittest.TestCase):
     def test_defaults_to_merge_commit_and_accepts_known_strategies(self):
-        self.assertEqual(("42", "merge_commit"), _parse_merge_pr_args(["42"]))
         self.assertEqual(
-            ("42", "squash"), _parse_merge_pr_args(["42", "--strategy", "squash"])
+            ("42", "merge_commit", None, True), _parse_merge_pr_args(["42"])
+        )
+        self.assertEqual(
+            ("42", "squash", None, True),
+            _parse_merge_pr_args(["42", "--strategy", "squash"]),
+        )
+
+    def test_reads_the_merge_message_inline_or_from_a_file(self):
+        self.assertEqual(
+            ("42", "merge_commit", "ship it [skip-ci]", True),
+            _parse_merge_pr_args(["42", "--message", "ship it [skip-ci]"]),
+        )
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write("from a file\n")
+            path = handle.name
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(
+            ("42", "merge_commit", "from a file\n", True),
+            _parse_merge_pr_args(["42", "--message-file", path]),
+        )
+
+    def test_no_branch_delete_keeps_the_source_branch(self):
+        self.assertEqual(
+            ("42", "merge_commit", None, False),
+            _parse_merge_pr_args(["42", "--no-branch-delete"]),
+        )
+        self.assertEqual(
+            ("42", "squash", "done", False),
+            _parse_merge_pr_args(
+                ["42", "--no-branch-delete", "--strategy", "squash",
+                 "--message", "done"]
+            ),
         )
 
     def test_rejects_invalid_arguments(self):
@@ -348,6 +380,10 @@ class MergePullRequestArgumentsTest(unittest.TestCase):
             ["42", "--strategy", "rebase"],
             ["42", "--unknown"],
             ["42", "43"],
+            ["42", "--message"],
+            ["42", "--message", "a", "--message-file", "/tmp/b.txt"],
+            ["42", "--message-file", "/nonexistent/merge-message.txt"],
+            ["42", "--no-branch-delete", "extra"],
         ]
         for args in cases:
             with self.subTest(args=args):

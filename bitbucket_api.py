@@ -470,6 +470,8 @@ def _parse_merge_pr_args(args):
     pr_id, rest = _leading_positional("merge-pr", args, "PR ID")
     _validate_pr_id("merge-pr", pr_id)
     strategy = "merge_commit"
+    message = None
+    close_source = True
     index = 0
     while index < len(rest):
         arg = rest[index]
@@ -483,23 +485,46 @@ def _parse_merge_pr_args(args):
                     f"(expected one of: {', '.join(MERGE_STRATEGIES)})"
                 )
             index += 2
+        elif arg in ("--message", "--message-file"):
+            if message is not None:
+                _fail("merge-pr accepts only one of --message/--message-file")
+            value = _option_value(rest, index, "a value")
+            if arg == "--message":
+                message = value
+            else:
+                try:
+                    with open(value, encoding="utf-8") as handle:
+                        message = handle.read()
+                except OSError as error:
+                    _fail(f"could not read {value}: {error.strerror or error}")
+            index += 2
+        elif arg == "--no-branch-delete":
+            close_source = False
+            index += 1
         elif _looks_like_option(arg):
             _fail(f"unknown merge-pr option: {arg}")
         else:
             _fail(f"unexpected merge-pr argument: {arg!r}")
-    return pr_id, strategy
+    return pr_id, strategy, message, close_source
 
 
-def cmd_merge_pr(config, pr_id, strategy="merge_commit"):
+def cmd_merge_pr(config, pr_id, strategy="merge_commit", message=None,
+                 close_source=True):
     """Merge a pull request."""
+    payload = {"merge_strategy": strategy, "close_source_branch": close_source}
+    if message is not None:
+        payload["message"] = message
     data = api_request(
         config,
         f"/pullrequests/{pr_id}/merge",
         method="POST",
-        data={"merge_strategy": strategy, "close_source_branch": True}
+        data=payload
     )
     print(f"Merged PR #{pr_id}: {data.get('title', '')}")
     print(f"Merge commit: {data.get('merge_commit', {}).get('hash', '—')[:12]}")
+    if not close_source:
+        branch = data.get("source", {}).get("branch", {}).get("name") or "—"
+        print(f"Source branch kept: {branch}")
 
 
 def cmd_approve_pr(config, pr_id):
@@ -1039,6 +1064,8 @@ Commands:
   update-pr <ID> [--title TEXT] [--description TEXT | --description-file PATH]
                                      Update PR title and/or description
   merge-pr <ID> [--strategy S]       Merge PR (merge_commit/squash/fast_forward)
+             [--message TEXT | --message-file PATH]   Merge commit message
+             [--no-branch-delete]    Keep the source branch after the merge
   approve-pr <ID>                    Approve PR as the configured account
   decline-pr <ID>                    Decline PR
   pr-comments <ID>                   List PR comments
@@ -1120,8 +1147,8 @@ def main():
         cmd_update_pr(config, pr_id, title=title, description=description)
 
     elif cmd == "merge-pr":
-        pr_id, strategy = _parse_merge_pr_args(args)
-        cmd_merge_pr(config, pr_id, strategy)
+        pr_id, strategy, message, close_source = _parse_merge_pr_args(args)
+        cmd_merge_pr(config, pr_id, strategy, message, close_source)
 
     elif cmd == "approve-pr":
         cmd_approve_pr(config, _single_pr_id(cmd, args))

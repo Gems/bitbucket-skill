@@ -157,10 +157,34 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" pr-commits 123
 
 ```bash
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --strategy squash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --message "Merged in topic (pull request #123) [skip-ci]"
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --no-branch-delete
 ```
 
 - `--strategy`: `merge_commit` (default), `squash`, `fast_forward` — any other
   value is rejected locally instead of merging with the default strategy
+- `--message TEXT` / `--message-file PATH` — the merge commit message, replacing
+  Bitbucket's generated one. Use it to carry `[skip-ci]` into the merge commit
+  when the merged change cannot affect a build (docs, agent instructions), so
+  the destination branch's post-merge pipeline does not run. The two are
+  mutually exclusive; without either, Bitbucket writes its own message.
+- `--no-branch-delete` — keep the source branch instead of closing (deleting)
+  it. The default closes it, which is what a finished topic branch wants. Pass
+  this flag when the branch outlives the PR: a long-running integration or
+  release branch, a shared base other branches are still forked from, or a
+  branch that already has a follow-up PR open against it. Closing such a branch
+  strands whatever still points at it. When in doubt about a non-topic branch,
+  pass it — a branch left behind is deleted in one click, a closed one has to be
+  restored.
+
+A repository may enforce **merge checks**, and the API refuses the merge when
+they are unmet — `Error 400: ... "2 failed merge checks"`, listing them (e.g.
+`1 successful build on last commit`, `No in progress builds on last commit`).
+That is the repository's gate, not a bad invocation: do not retry, and do not
+try to route around it. Wait for the build and merge once it is green (see
+**Merge When Green**), or tell the user which check is blocking. Note a
+`[skip-ci]` commit does not exempt a PR from a build-based check — something
+still has to produce that successful build before the merge is allowed.
 
 ### Approve Pull Request
 
