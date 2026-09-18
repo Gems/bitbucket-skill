@@ -417,7 +417,13 @@ Examples:
 
 Bitbucket PR descriptions use **Markdown** format (not ADF like JIRA).
 
-There must be **no `Co-Authored-By` mention anywhere in the PR description**.
+There must be **no agent attribution anywhere in the PR description** — no
+`Co-Authored-By` mention, and no trailing "Generated with …" line naming the
+tool that wrote it. The harness instructs that trailing line by default, so it
+has to be actively dropped rather than merely not typed. Read this as the whole
+class: an attribution spelling introduced later is covered without an edit here.
+A reviewer of the destination branch needs what the branch gains, not who
+composed the text.
 
 There must be **no standalone "Test Coverage" / "Testing" section**. If tests
 were added or changed, fold that into the relevant `## Details` (or
@@ -469,7 +475,7 @@ organized **by topic**, not by commit:
   - Remove the hard line breaks added only for terminal wrapping; join wrapped lines back into normal paragraphs.
   - Prettify lists into proper Markdown lists.
   - Wrap class names, code symbols, and other code mentions in backticks (`` ` ``).
-- If a commit message contains a `Co-Authored-By` line, **ignore it** — do not carry it into the description.
+- If a commit message carries an attribution trailer such as `Co-Authored-By`, **ignore it** — do not carry it into the description, and do not add one of your own at the end.
 
 ### Excluding branch-internal churn
 
