@@ -158,7 +158,7 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" pr-commits 123
 ```bash
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --strategy squash
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --message "Merged in topic (pull request #123) [skip-ci]"
-python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --no-branch-delete
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --no-close
 ```
 
 - `--strategy`: `merge_commit` (default), `squash`, `fast_forward` — any other
@@ -168,14 +168,15 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" merge-pr 123 --no-branch-delete
   when the merged change cannot affect a build (docs, agent instructions), so
   the destination branch's post-merge pipeline does not run. The two are
   mutually exclusive; without either, Bitbucket writes its own message.
-- `--no-branch-delete` — keep the source branch instead of closing (deleting)
-  it. The default closes it, which is what a finished topic branch wants. Pass
-  this flag when the branch outlives the PR: a long-running integration or
-  release branch, a shared base other branches are still forked from, or a
+- `--no-close` — keep the source branch instead of closing (deleting) it, the
+  same flag `create-pr` takes, decided here at merge time rather than when the
+  PR was opened. The default closes it, which is what a finished topic branch
+  wants. Pass this when the branch outlives its PR: a long-running integration
+  or release branch, a shared base other branches are still forked from, or a
   branch that already has a follow-up PR open against it. Closing such a branch
   strands whatever still points at it. When in doubt about a non-topic branch,
-  pass it — a branch left behind is deleted in one click, a closed one has to be
-  restored.
+  pass it — a branch left behind is deleted in one click, a closed one has to
+  be restored.
 
 A repository may enforce **merge checks**, and the API refuses the merge when
 they are unmet — `Error 400: ... "2 failed merge checks"`, listing them (e.g.
