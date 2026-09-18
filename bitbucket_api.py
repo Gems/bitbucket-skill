@@ -498,7 +498,7 @@ def _parse_merge_pr_args(args):
                 except OSError as error:
                     _fail(f"could not read {value}: {error.strerror or error}")
             index += 2
-        elif arg == "--no-branch-delete":
+        elif arg == "--no-close":
             close_source = False
             index += 1
         elif _looks_like_option(arg):
@@ -1065,7 +1065,7 @@ Commands:
                                      Update PR title and/or description
   merge-pr <ID> [--strategy S]       Merge PR (merge_commit/squash/fast_forward)
              [--message TEXT | --message-file PATH]   Merge commit message
-             [--no-branch-delete]    Keep the source branch after the merge
+             [--no-close]                             Keep the source branch
   approve-pr <ID>                    Approve PR as the configured account
   decline-pr <ID>                    Decline PR
   pr-comments <ID>                   List PR comments

@@ -358,15 +358,15 @@ class MergePullRequestArgumentsTest(unittest.TestCase):
             _parse_merge_pr_args(["42", "--message-file", path]),
         )
 
-    def test_no_branch_delete_keeps_the_source_branch(self):
+    def test_no_close_keeps_the_source_branch(self):
         self.assertEqual(
             ("42", "merge_commit", None, False),
-            _parse_merge_pr_args(["42", "--no-branch-delete"]),
+            _parse_merge_pr_args(["42", "--no-close"]),
         )
         self.assertEqual(
             ("42", "squash", "done", False),
             _parse_merge_pr_args(
-                ["42", "--no-branch-delete", "--strategy", "squash",
+                ["42", "--no-close", "--strategy", "squash",
                  "--message", "done"]
             ),
         )
@@ -383,7 +383,7 @@ class MergePullRequestArgumentsTest(unittest.TestCase):
             ["42", "--message"],
             ["42", "--message", "a", "--message-file", "/tmp/b.txt"],
             ["42", "--message-file", "/nonexistent/merge-message.txt"],
-            ["42", "--no-branch-delete", "extra"],
+            ["42", "--no-close", "extra"],
         ]
         for args in cases:
             with self.subTest(args=args):
