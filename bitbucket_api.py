@@ -88,11 +88,15 @@ def api_request(config, path, method="GET", data=None, allow_404=False):
     repo_slug = config["repo_slug"]
     url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}{path}"
     body = json.dumps(data).encode() if data else None
-    req = urllib.request.Request(url, data=body, method=method, headers={
+    headers = {
         "Authorization": _auth_header(config),
         "Accept": "application/json",
-        "Content-Type": "application/json",
-    })
+    }
+    if body is not None:
+        # A bodyless POST (approve, decline) must not claim JSON: Bitbucket
+        # rejects the empty body with a 400.
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, context=SSL_CTX) as resp:
             return json.loads(resp.read())
