@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from bitbucket_api import (
     COMMANDS,
+    api_request,
     _NoRedirect,
     _config_paths,
     _fetch_pipeline,
@@ -208,6 +209,24 @@ class PullRequestCommandsTest(unittest.TestCase):
         self.assertIn("Approved PR #42", stdout.getvalue())
         self.assertIn("Reviewer Name", stdout.getvalue())
         self.assertIn("approved", stdout.getvalue())
+
+
+class ApiRequestHeadersTest(unittest.TestCase):
+    def _sent_request(self, data):
+        config = {"workspace": "ws", "repo_slug": "repo"}
+        response = io.BytesIO(b"{}")
+        with patch("bitbucket_api._auth_header", return_value="Basic x"), \
+                patch("bitbucket_api.urllib.request.urlopen",
+                      return_value=response) as urlopen:
+            api_request(config, "/pullrequests/1/approve", method="POST", data=data)
+        return urlopen.call_args.args[0]
+
+    def test_bodyless_post_sends_no_content_type(self):
+        self.assertIsNone(self._sent_request(None).get_header("Content-type"))
+
+    def test_post_with_body_sends_json_content_type(self):
+        request = self._sent_request({"a": 1})
+        self.assertEqual("application/json", request.get_header("Content-type"))
 
 
 class ListPullRequestArgumentsTest(unittest.TestCase):
