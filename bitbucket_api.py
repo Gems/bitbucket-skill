@@ -63,7 +63,32 @@ def load_config():
         print("Create: Bitbucket → Personal settings → App passwords", file=sys.stderr)
         sys.exit(1)
     with open(path) as f:
-        return json.load(f)
+        config = json.load(f)
+    _resolve_repo(config)
+    return config
+
+
+def _resolve_repo(config):
+    """Fill in workspace/repo_slug from the cwd's git remote where the config
+    leaves them out, so a loaded config is always ready for `api_request`.
+    Values set in the config take precedence over the remote."""
+    if "workspace" in config and "repo_slug" in config:
+        return
+    ws, repo = _detect_repo_info()
+    if not (ws and repo):
+        print(
+            "Error: Could not detect workspace/repo from the current directory's "
+            "git remote.\nIf you `cd`-ed into this script's own directory before "
+            "running it, note it may be a symlink to a shared location unrelated "
+            "to your target repo - re-run with cwd at the target repo's root "
+            "instead (invoke the script by absolute path, don't cd to it).\n"
+            "Alternatively, add \"workspace\"/\"repo_slug\" to "
+            f"{_config_path()} (note: that config may be shared across repos).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    config.setdefault("workspace", ws)
+    config.setdefault("repo_slug", repo)
 
 
 def _auth_header(config):
@@ -220,17 +245,23 @@ def _single_pr_id(command, args):
 
 # ─── Commands ────────────────────────────────────────
 
-def _parse_description_flag(command, args, index, already_set):
-    """Resolve --description/--description-file at args[index] to its text.
+DESCRIPTION_FLAGS = ("--description", "--description-file")
+MESSAGE_FLAGS = ("--message", "--message-file")
+COMMENT_BODY_FLAGS = ("--body", "--body-file")
+
+
+def _parse_text_flag(command, args, index, already_set, flags):
+    """Resolve a TEXT/PATH flag pair such as --description/--description-file
+    at args[index] to its text.
 
     Exits when the flag is repeated, combined with its sibling, missing its
     value, or points at a file that cannot be read.
     """
     flag = args[index]
     if already_set:
-        _fail(f"{command} accepts only one of --description/--description-file")
+        _fail(f"{command} accepts only one of {'/'.join(flags)}")
     value = _option_value(args, index, "a value")
-    if flag == "--description":
+    if flag == flags[0]:
         return value
     try:
         with open(value, encoding="utf-8") as handle:
@@ -250,9 +281,9 @@ def _parse_create_pr_args(args):
     index = 0
     while index < len(rest):
         arg = rest[index]
-        if arg in ("--description", "--description-file"):
-            description = _parse_description_flag(
-                "create-pr", rest, index, description is not None
+        if arg in DESCRIPTION_FLAGS:
+            description = _parse_text_flag(
+                "create-pr", rest, index, description is not None, DESCRIPTION_FLAGS
             )
             index += 2
         elif arg in ("--source", "--destination"):
@@ -376,8 +407,26 @@ def cmd_list_prs(config, state="OPEN", source_branch=None):
         print(f"| {pr_id} | {title} | {author} | {branch} | {updated} |")
 
 
-def cmd_get_pr(config, pr_id):
-    """Get pull request details."""
+DESCRIPTION_PREVIEW = 500
+
+
+def _parse_get_pr_args(args):
+    pr_id, rest = _leading_positional("get-pr", args, "PR ID")
+    _validate_pr_id("get-pr", pr_id)
+    full = False
+    for arg in rest:
+        if arg == "--full":
+            full = True
+        elif _looks_like_option(arg):
+            _fail(f"unknown get-pr option: {arg}")
+        else:
+            _fail(f"unexpected get-pr argument: {arg!r}")
+    return pr_id, full
+
+
+def cmd_get_pr(config, pr_id, full=False):
+    """Get pull request details; the description is cut to a preview unless
+    `full` is set."""
     pr = api_request(config, f"/pullrequests/{pr_id}")
     source = pr["source"]["branch"]["name"]
     dest = pr["destination"]["branch"]["name"]
@@ -386,7 +435,10 @@ def cmd_get_pr(config, pr_id):
     created = pr["created_on"][:10] if pr.get("created_on") else "—"
     updated = pr["updated_on"][:10] if pr.get("updated_on") else "—"
     url = pr["links"]["html"]["href"]
-    desc = pr.get("description", "")[:500] or "No description"
+    desc = pr.get("description") or "No description"
+    if not full and len(desc) > DESCRIPTION_PREVIEW:
+        desc = (f"{desc[:DESCRIPTION_PREVIEW]}\n\n...(first {DESCRIPTION_PREVIEW} "
+                f"of {len(desc)} chars; pass --full for the whole description)...")
     reviewers = ", ".join(
         r.get("display_name", "—") for r in pr.get("reviewers", [])
     ) or "—"
@@ -427,9 +479,9 @@ def _parse_update_pr_args(args):
     index = 0
     while index < len(rest):
         arg = rest[index]
-        if arg in ("--description", "--description-file"):
-            description = _parse_description_flag(
-                "update-pr", rest, index, description is not None
+        if arg in DESCRIPTION_FLAGS:
+            description = _parse_text_flag(
+                "update-pr", rest, index, description is not None, DESCRIPTION_FLAGS
             )
             index += 2
         elif arg == "--title":
@@ -489,18 +541,10 @@ def _parse_merge_pr_args(args):
                     f"(expected one of: {', '.join(MERGE_STRATEGIES)})"
                 )
             index += 2
-        elif arg in ("--message", "--message-file"):
-            if message is not None:
-                _fail("merge-pr accepts only one of --message/--message-file")
-            value = _option_value(rest, index, "a value")
-            if arg == "--message":
-                message = value
-            else:
-                try:
-                    with open(value, encoding="utf-8") as handle:
-                        message = handle.read()
-                except OSError as error:
-                    _fail(f"could not read {value}: {error.strerror or error}")
+        elif arg in MESSAGE_FLAGS:
+            message = _parse_text_flag(
+                "merge-pr", rest, index, message is not None, MESSAGE_FLAGS
+            )
             index += 2
         elif arg == "--no-close":
             close_source = False
@@ -547,57 +591,208 @@ def cmd_decline_pr(config, pr_id):
     print(f"Declined PR #{pr_id}: {data.get('title', '')}")
 
 
-def cmd_pr_comments(config, pr_id):
-    """List PR comments."""
-    data = api_request(config, f"/pullrequests/{pr_id}/comments?pagelen=50")
-    comments = data.get("values", [])
+# ─── Comments ────────────────────────────────────────
+#
+# A pending comment is a draft of the caller's review: only its author sees
+# it until the review is submitted in the Bitbucket UI. No command here sends
+# `pending: false` or submits a review, so a draft is never published as a
+# side effect of reading, adding, or editing comments.
+
+def _comment_anchor(comment):
+    """Where a comment sits: `path:line` when inline, `general` otherwise."""
+    inline = comment.get("inline")
+    if not inline:
+        return "general"
+    path = inline.get("path", "—")
+    if inline.get("to") is not None:
+        return f"{path}:{inline['to']}"
+    if inline.get("from") is not None:
+        return f"{path}:{inline['from']} (old side)"
+    return path
+
+
+def _comment_pending(comment):
+    return "true" if comment.get("pending") else "false"
+
+
+def _parse_comments_args(command, args):
+    pr_id, rest = _leading_positional(command, args, "PR ID")
+    _validate_pr_id(command, pr_id)
+    pending_only = False
+    as_json = False
+    for arg in rest:
+        if arg == "--pending-only":
+            pending_only = True
+        elif arg == "--json":
+            as_json = True
+        elif _looks_like_option(arg):
+            _fail(f"unknown {command} option: {arg}")
+        else:
+            _fail(f"unexpected {command} argument: {arg!r}")
+    return pr_id, pending_only, as_json
+
+
+def cmd_comments(config, pr_id, pending_only=False, as_json=False):
+    """List every comment on a PR, the caller's pending drafts included, with
+    its full text."""
+    comments = _paginated_values(
+        config, f"/pullrequests/{pr_id}/comments?pagelen=100"
+    )
+    if pending_only:
+        comments = [c for c in comments if c.get("pending")]
+    if as_json:
+        print(json.dumps(comments, indent=2, ensure_ascii=False))
+        return
+    kind = "pending comments" if pending_only else "comments"
     if not comments:
-        print("No comments.")
+        print(f"No {kind} on PR #{pr_id}.")
         return
 
-    print(f"## Comments on PR #{pr_id}\n")
+    print(f"## {kind.capitalize()} on PR #{pr_id} ({len(comments)})\n")
     for c in comments:
-        author = c.get("user", {}).get("display_name", "—")
-        created = c.get("created_on", "")[:16].replace("T", " ")
-        body = c.get("content", {}).get("raw", "")[:400]
-        inline = c.get("inline")
-        location = ""
-        if inline:
-            path = inline.get("path", "")
-            line = inline.get("to") or inline.get("from") or ""
-            location = f" (`{path}:{line}`)"
-        print(f"**{author}** — {created}{location}")
-        print(f"{body}\n")
+        details = [
+            f"Pending: {_comment_pending(c)}",
+            f"Author: {(c.get('user') or {}).get('display_name', '—')}",
+            f"Where: {_comment_anchor(c)}",
+            f"Created: {c.get('created_on', '')[:16].replace('T', ' ') or '—'}",
+        ]
+        parent = (c.get("parent") or {}).get("id")
+        if parent:
+            details.append(f"Reply to: {parent}")
+        if c.get("deleted"):
+            details.append("Deleted: true")
+        print(f"### Comment {c.get('id', '—')}")
+        print(" | ".join(details))
+        print()
+        print((c.get("content") or {}).get("raw") or "")
+        print("\n<<<END>>>\n")
+
+
+def _validate_comment_id(command, value):
+    if not value.isdigit() or int(value) < 1:
+        _fail(f"{command} requires a numeric COMMENT_ID, got {value!r}")
+    return value
 
 
 def _parse_add_comment_args(args):
     pr_id, rest = _leading_positional("add-comment", args, "PR ID")
     _validate_pr_id("add-comment", pr_id)
-    if not rest:
-        _fail("add-comment requires comment text")
-    # The remaining words are joined into the comment, so nothing can be
-    # dropped - but add-comment has no options, so an option-shaped first
-    # word is a typo rather than prose. A markdown `---` rule still passes.
-    if _looks_like_flag_name(rest[0]):
-        _fail(
-            f"unknown add-comment option: {rest[0]} "
-            "(usage: add-comment <ID> <TEXT>)"
-        )
-    text = " ".join(rest)
+    text = None
+    path = None
+    line = None
+    pending = False
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        if arg in COMMENT_BODY_FLAGS:
+            text = _parse_text_flag(
+                "add-comment", rest, index, text is not None, COMMENT_BODY_FLAGS
+            )
+            index += 2
+        elif arg == "--path":
+            path = _option_value(rest, index, "a file path")
+            index += 2
+        elif arg == "--line":
+            value = _option_value(rest, index, "a line number")
+            if not value.isdigit() or int(value) < 1:
+                _fail(f"--line requires a positive line number, got {value!r}")
+            line = int(value)
+            index += 2
+        elif arg == "--pending":
+            pending = True
+            index += 1
+        elif _looks_like_flag_name(arg):
+            _fail(f"unknown add-comment option: {arg}")
+        elif text is None:
+            # The original `add-comment <ID> <TEXT>` form. Only one word is
+            # taken: joining unquoted words would turn a `--pending` typed
+            # inside the prose into a draft, or one meant as a flag into text.
+            text = arg
+            index += 1
+        else:
+            _fail(
+                f"unexpected add-comment argument: {arg!r} "
+                "(quote the comment text, or pass it with --body/--body-file)"
+            )
+    if text is None:
+        _fail("add-comment requires --body TEXT or --body-file PATH")
     if not text.strip():
         _fail("add-comment requires non-empty comment text")
-    return pr_id, text
+    if (path is None) != (line is None):
+        _fail("an inline comment needs both --path and --line")
+    return pr_id, text, path, line, pending
 
 
-def cmd_add_comment(config, pr_id, text):
-    """Add a comment to a PR."""
+def cmd_add_comment(config, pr_id, text, path=None, line=None, pending=False):
+    """Add a general or inline comment to a PR, as a pending draft when
+    `pending` is set."""
+    payload = {"content": {"raw": text}}
+    if path is not None:
+        payload["inline"] = {"path": path, "to": line}
+    if pending:
+        payload["pending"] = True
     data = api_request(
-        config,
-        f"/pullrequests/{pr_id}/comments",
-        method="POST",
-        data={"content": {"raw": text}}
+        config, f"/pullrequests/{pr_id}/comments", method="POST", data=payload
     )
-    print(f"Comment added to PR #{pr_id}")
+    print(f"Added comment {data.get('id', '—')} to PR #{pr_id}")
+    print(f"Pending: {_comment_pending(data)} | Where: {_comment_anchor(data)}")
+    if pending and not data.get("pending"):
+        _fail(
+            f"comment {data.get('id')} was sent as a draft, "
+            "but Bitbucket published it"
+        )
+
+
+def _parse_edit_comment_args(args):
+    pr_id, rest = _leading_positional("edit-comment", args, "PR ID")
+    _validate_pr_id("edit-comment", pr_id)
+    comment_id, rest = _leading_positional("edit-comment", rest, "COMMENT_ID")
+    _validate_comment_id("edit-comment", comment_id)
+    text = None
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        if arg in COMMENT_BODY_FLAGS:
+            text = _parse_text_flag(
+                "edit-comment", rest, index, text is not None, COMMENT_BODY_FLAGS
+            )
+            index += 2
+        elif _looks_like_option(arg):
+            _fail(f"unknown edit-comment option: {arg}")
+        else:
+            _fail(
+                f"unexpected edit-comment argument: {arg!r} "
+                "(pass the new text with --body/--body-file)"
+            )
+    if text is None:
+        _fail("edit-comment requires --body TEXT or --body-file PATH")
+    if not text.strip():
+        _fail("edit-comment requires non-empty comment text")
+    return pr_id, comment_id, text
+
+
+def cmd_edit_comment(config, pr_id, comment_id, text):
+    """Replace a comment's text, then re-read it to show that its pending
+    state and anchor did not change."""
+    path = f"/pullrequests/{pr_id}/comments/{comment_id}"
+    before = api_request(config, path)
+    # Only the text is sent, so the PUT cannot publish a draft or move it.
+    api_request(config, path, method="PUT", data={"content": {"raw": text}})
+    after = api_request(config, path)
+
+    print(f"Updated comment {comment_id} on PR #{pr_id}")
+    checks = (
+        ("Pending", _comment_pending(before), _comment_pending(after)),
+        ("Where", _comment_anchor(before), _comment_anchor(after)),
+    )
+    print(" | ".join(
+        f"{label}: {new} (unchanged)" if old == new
+        else f"{label}: {old} → {new} (CHANGED)"
+        for label, old, new in checks
+    ))
+    changed = [label for label, old, new in checks if old != new]
+    if changed:
+        _fail(f"editing comment {comment_id} changed its {' and '.join(changed)}")
 
 
 # Bitbucket caps a page at 100 results, and the pipeline listing is not
@@ -1063,7 +1258,7 @@ Commands:
                                      Create pull request
   list-prs [STATE] [--source BRANCH | --current-branch]
                                      List PRs (OPEN/MERGED/DECLINED/SUPERSEDED)
-  get-pr <ID>                        View PR details
+  get-pr <ID> [--full]               View PR details (--full: the whole description)
   pr-commits <ID>                    List a PR's non-merge commits and full messages
   update-pr <ID> [--title TEXT] [--description TEXT | --description-file PATH]
                                      Update PR title and/or description
@@ -1072,8 +1267,14 @@ Commands:
              [--no-close]                             Keep the source branch
   approve-pr <ID>                    Approve PR as the configured account
   decline-pr <ID>                    Decline PR
-  pr-comments <ID>                   List PR comments
-  add-comment <ID> <TEXT>            Add comment to PR
+  comments <ID> [--pending-only] [--json]
+                                     List PR comments with full text, anchor and
+                                     pending state (alias: pr-comments)
+  add-comment <ID> (--body TEXT | --body-file PATH)
+              [--path FILE --line N] [--pending]
+                                     Add a general or inline comment (--pending: a draft)
+  edit-comment <ID> <COMMENT_ID> (--body TEXT | --body-file PATH)
+                                     Replace a comment's text, keeping it pending/inline
   pipelines [COUNT]                  List recent pipelines
   pipeline <PIPELINE_ID>             Show one run (build number or uuid) with its steps
   run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]
@@ -1088,8 +1289,9 @@ or a full/short pipeline uuid."""
 
 COMMANDS = (
     "create-pr", "list-prs", "get-pr", "pr-commits", "update-pr", "merge-pr",
-    "approve-pr", "decline-pr", "pr-comments", "add-comment", "pipelines",
-    "pipeline", "run-pipeline", "pipeline-steps", "pipeline-log",
+    "approve-pr", "decline-pr", "comments", "pr-comments", "add-comment",
+    "edit-comment", "pipelines", "pipeline", "run-pipeline", "pipeline-steps",
+    "pipeline-log",
 )
 
 
@@ -1111,25 +1313,6 @@ def main():
 
     config = load_config()
 
-    # Auto-detect workspace/repo from git remote if not in config
-    if "workspace" not in config or "repo_slug" not in config:
-        ws, repo = _detect_repo_info()
-        if ws and repo:
-            config.setdefault("workspace", ws)
-            config.setdefault("repo_slug", repo)
-        else:
-            print(
-                "Error: Could not detect workspace/repo from the current directory's "
-                "git remote.\nIf you `cd`-ed into this script's own directory before "
-                "running it, note it may be a symlink to a shared location unrelated "
-                "to your target repo - re-run with cwd at the target repo's root "
-                "instead (invoke the script by absolute path, don't cd to it).\n"
-                "Alternatively, add \"workspace\"/\"repo_slug\" to "
-                f"{_config_path()} (note: that config may be shared across repos).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
     if cmd == "create-pr":
         title, description, source, destination, close_source = (
             _parse_create_pr_args(args)
@@ -1141,7 +1324,8 @@ def main():
         cmd_list_prs(config, state, source_branch=source_branch)
 
     elif cmd == "get-pr":
-        cmd_get_pr(config, _single_pr_id(cmd, args))
+        pr_id, full = _parse_get_pr_args(args)
+        cmd_get_pr(config, pr_id, full)
 
     elif cmd == "pr-commits":
         cmd_pr_commits(config, _single_pr_id(cmd, args))
@@ -1160,12 +1344,17 @@ def main():
     elif cmd == "decline-pr":
         cmd_decline_pr(config, _single_pr_id(cmd, args))
 
-    elif cmd == "pr-comments":
-        cmd_pr_comments(config, _single_pr_id(cmd, args))
+    elif cmd in ("comments", "pr-comments"):
+        pr_id, pending_only, as_json = _parse_comments_args(cmd, args)
+        cmd_comments(config, pr_id, pending_only, as_json)
 
     elif cmd == "add-comment":
-        pr_id, text = _parse_add_comment_args(args)
-        cmd_add_comment(config, pr_id, text)
+        pr_id, text, path, line, pending = _parse_add_comment_args(args)
+        cmd_add_comment(config, pr_id, text, path, line, pending)
+
+    elif cmd == "edit-comment":
+        pr_id, comment_id, text = _parse_edit_comment_args(args)
+        cmd_edit_comment(config, pr_id, comment_id, text)
 
     elif cmd == "pipelines":
         cmd_pipelines(config, _parse_pipelines_args(args))
