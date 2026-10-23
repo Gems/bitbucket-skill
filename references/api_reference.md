@@ -94,11 +94,26 @@ curl -X POST -u "$USER:$PASS" \
   }'
 ```
 
+Add `"pending": true` to either payload to save the comment as a draft of
+your review instead of publishing it.
+
 ### List Comments
 ```bash
 curl -u "$USER:$PASS" \
-  "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments"
+  "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments?pagelen=100"
 ```
+
+Paginated: follow `next`. Your own drafts are included with `"pending": true`.
+
+### Edit Comment
+```bash
+curl -X PUT -u "$USER:$PASS" \
+  -H "Content-Type: application/json" \
+  "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments/{comment_id}" \
+  -d '{"content": {"raw": "New text"}}'
+```
+
+Sending only `content` leaves the pending state and inline anchor unchanged.
 
 ## Pipelines API
 
