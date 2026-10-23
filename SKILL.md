@@ -2,8 +2,9 @@
 name: bitbucket
 description: >
   Interact with Bitbucket — create PRs, list PRs, view PR details, update a PR's title/description, approve, merge,
-  decline, read comments, view and trigger pipelines, CI-gated merge (poll the PR pipeline and merge when green), code
-  review with inline comments, manage environments and variables. Use when user says "/bitbucket pr",
+  decline, read, add and edit PR comments (pending review drafts included), view and trigger pipelines, CI-gated merge
+  (poll the PR pipeline and merge when green), code review with inline comments, manage environments and variables.
+  Use when user says "/bitbucket pr", "/bitbucket comments", "/bitbucket edit-comment", "edit my draft comment",
   "/bitbucket create-pr", "/bitbucket list-prs", "/bitbucket approve-pr", "approve PR", "/bitbucket pipelines",
   "/bitbucket run-pipeline", "run the pipeline", "trigger a build", "/bitbucket pipeline 1333", asks what happened in a
   build / pipeline named by its number ("check build #1333"), "/bitbucket merge-when-green", "/bitbucket ship",
@@ -37,6 +38,15 @@ one that exists; if multiple exist, prefer a repo-attached copy**:
 
 Set `BITBUCKET_SKILL` to the resolved `bitbucket` directory, then invoke
 `python3 "$BITBUCKET_SKILL/bitbucket_api.py" <command> [args]`.
+
+Check these paths directly (`ls ~/.claude/skills/bitbucket/bitbucket_api.py`)
+rather than searching for the file: the `bitbucket` directory is commonly a
+symlink, and `find` does not descend into one without `-L`, so a search comes
+back empty although the script is there.
+
+Use the CLI commands, not `bitbucket_api.py` imported from ad-hoc Python or a
+raw `curl`: PR details, comments (pending drafts included), and edits to them
+all have a command below.
 
 **Never `cd` into the script's directory before running it.** Workspace/repo
 auto-detection reads the git remote of the *current working directory* — and
@@ -83,7 +93,10 @@ Create: Bitbucket → Personal settings → App passwords (scopes: Repositories 
 ```
 Create: Repository settings → Access tokens → Create.
 
-**Note**: `workspace` and `repo_slug` are optional — auto-detected from `git remote get-url origin`.
+**Note**: `workspace` and `repo_slug` are optional — whichever the config leaves
+out is detected from the current directory's `git remote get-url origin`, so
+any Bitbucket checkout works with a credentials-only config. A value set in the
+config wins over the remote.
 **Note**: Atlassian API Tokens (used for JIRA) do NOT work with Bitbucket Cloud API.
 
 ## Commands
@@ -139,8 +152,12 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" list-prs [STATE] [--source BRANCH | 
 **Trigger**: `/bitbucket get-pr <ID>`, `/bitbucket pr <ID>`
 
 ```bash
-python3 "$BITBUCKET_SKILL/bitbucket_api.py" get-pr 123
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" get-pr 123 --full
 ```
+
+- Without `--full` the description is cut to its first 500 characters, with a
+  note giving its full length. Pass `--full` whenever the description itself
+  matters (reviewing, quoting, or rewriting it).
 
 ### Pull Request Commits
 
@@ -212,11 +229,21 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" decline-pr 123
 
 ### PR Comments
 
-**Trigger**: `/bitbucket pr-comments <ID>`
+**Trigger**: `/bitbucket comments <ID>`, `/bitbucket pr-comments <ID>`, "show the PR comments", "list my draft comments"
 
 ```bash
-python3 "$BITBUCKET_SKILL/bitbucket_api.py" pr-comments 123
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" comments 123 --pending-only
 ```
+
+- Follows every result page and prints each comment as `### Comment <id>`, a
+  `Pending: true|false | Author | Where | Created` line (plus `Reply to: <id>`
+  for a reply), then its full untruncated text and an `<<<END>>>` line.
+- `Where` is `path:line` for an inline comment (`path:N (old side)` on a
+  removed line) and `general` otherwise.
+- `--pending-only` keeps only pending comments: your own unsubmitted review
+  drafts, which only their author can see.
+- `--json` prints the raw comment objects (after `--pending-only`, if given).
+- `pr-comments` is an alias.
 
 ### Update Pull Request
 
@@ -251,15 +278,47 @@ and **PR Description Formatting** below, then apply with `update-pr`:
 
 ### Add Comment to PR
 
-**Trigger**: `/bitbucket add-comment <ID> <text>`
+**Trigger**: `/bitbucket add-comment <ID> <text>`, "comment on line N of FILE", "leave a draft comment"
 
 ```bash
-python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 "LGTM! Ready to merge."
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 --path src/Model.php --line 45 --pending --body-file /tmp/finding.md
 ```
 
-- Everything after the ID becomes the comment body (unquoted words are joined),
-  so quote the text. `add-comment` takes no options — an option-shaped first
-  word is treated as a typo rather than posted as a comment.
+- `--body TEXT` or `--body-file PATH` — the comment (markdown). Use a file for
+  anything multi-line. A single quoted TEXT after the ID still works in place
+  of `--body`; unquoted words are rejected rather than joined.
+- `--path FILE --line N` — anchor it inline on line N of the PR's new version
+  of FILE (both or neither).
+- `--pending` — save it as a draft of your review, visible only to you until
+  the review is submitted. Without it the comment is published at once.
+- Prints the new comment's id and its `Pending`/`Where` state; exits non-zero
+  if a `--pending` comment came back published.
+
+### Edit a Comment
+
+**Trigger**: `/bitbucket edit-comment <ID> <COMMENT_ID>`, "reword my draft comment", "update that review comment"
+
+Edit a draft review comment and keep it pending:
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" comments 123 --pending-only
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" edit-comment 123 886718944 --body-file /tmp/finding.md
+```
+
+- Take the id from `comments`. `--body TEXT` / `--body-file PATH` replaces the
+  whole text; to change part of it, copy the current text from `comments`
+  first.
+- Only the text is sent, so the comment stays pending (or published) and keeps
+  its anchor. The command re-reads the comment and prints
+  `Pending: true (unchanged) | Where: path:line (unchanged)`; it exits non-zero
+  and marks the field `(CHANGED)` if either moved.
+
+### Pending comments are the user's to publish
+
+A pending comment is part of the user's unsubmitted review. No command here
+publishes one or submits a review, and none is to be done as a side effect:
+pending stays pending until the user explicitly asks to publish it. Submitting
+the review in the Bitbucket UI publishes all its drafts at once.
 
 ### Pipelines
 
@@ -536,13 +595,10 @@ Some work in a change set is deliberately included but isn't part of the PR's ma
 
 ### Single Inline Comment
 
-Use the `bb-comment.sh` script to add inline code review comments:
+Use `add-comment --path FILE --line N` (see **Add Comment to PR**); add
+`--pending` to keep it as a review draft. The older `bb-comment.sh` script
+posts published comments only:
 
-```bash
-"$BITBUCKET_SKILL/scripts/bb-comment.sh" <pr-id> <file-path> <line-number> "comment text"
-```
-
-Example:
 ```bash
 "$BITBUCKET_SKILL/scripts/bb-comment.sh" 42 app/code/Vendor/Module/Model/Example.php 45 "Use dependency injection here"
 ```

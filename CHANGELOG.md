@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `comments <ID> [--pending-only] [--json]`: lists every comment on a PR across all result pages, each with its id, pending state, author, inline anchor (`path:line`, or `general`), parent for replies, and full untruncated text. `--pending-only` keeps the caller's unsubmitted review drafts; `--json` prints the raw comment objects. `pr-comments` is now an alias of it, so it no longer stops at the first 50 comments or cuts each to 400 characters.
+- `add-comment`: `--body TEXT`/`--body-file PATH` for the text, `--path FILE --line N` for an inline anchor, and `--pending` to save the comment as a review draft. It prints the new comment's id and fails if a `--pending` comment comes back published.
+- `edit-comment <ID> <COMMENT_ID> (--body TEXT | --body-file PATH)`: replaces a comment's text via `PUT /pullrequests/{id}/comments/{cid}`, sending only `content.raw`. It re-reads the comment and prints its pending state and anchor as unchanged, or fails naming the one that changed.
+- `get-pr --full` prints the whole description. Without it the 500-character preview now says it was cut and how long the description is.
+- SKILL.md: documents the comment commands, and that a pending comment is published only when the user asks; no command publishes or submits a review. Also notes that the skill directory is often a symlink that `find` skips, and that agents should use the commands instead of importing `bitbucket_api.py`.
 - `approve-pr <ID>`: approves a PR via `POST /pullrequests/{id}/approve` as the account behind the configured credential, printing the approving user and resulting participant state. SKILL.md documents it as explicit-request-only — an approval is team-visible and counts toward merge checks, so it is never a step of another procedure.
 - `create-pr`: `--description-file PATH`, matching `update-pr`, so a full description no longer has to fit in a single shell argument.
 - `pipeline <PIPELINE_ID>`: shows a single run — status, branch, commit, PR number, custom-pipeline pattern, trigger, creator, timings, duration, result URL and full uuid — followed by its step table with each step's structured failure reason, and the `pipeline-log <uuid>` follow-up when a step failed. Takes the `#1333` build number Bitbucket shows in its UI and in `run-pipeline` output, so a number from a chat message or a `/pipelines/results/<N>` URL resolves in one call instead of a listing scan plus a uuid lookup.
@@ -17,8 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pipelines`: the listing now carries a `Build` column alongside the short id, so the number needed by the commands above is visible without opening Bitbucket.
 - `run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]`: triggers a pipeline via `POST /pipelines/`, closing the read-only gap left by `pipelines`/`pipeline-steps`/`pipeline-log`. Defaults to the current branch and its own definition; `--custom` selects a `pipelines.custom.<PATTERN>` definition and `--variable` is repeatable. Prints the build number, state, uuid, and result URL, plus the `pipeline-steps <uuid>` command to follow it. SKILL.md documents it as explicit-request-only, since a custom pipeline is frequently a deploy.
 
+### Changed
+
+- `add-comment` takes its text as one quoted argument or via `--body`/`--body-file`; several unquoted words are rejected instead of joined. Joining would let a `--pending` inside the prose turn the comment into a draft, or a flag typed after the text be posted as part of it.
+- `load_config()` fills in `workspace`/`repo_slug` from the current directory's git remote wherever the config leaves them out (config values still win), so code that loads the config gets a usable one in any Bitbucket checkout, instead of a config that fails on first use.
+
 ### Fixed
 
+- Workspace/repo detection from the git remote now requires the host to be `bitbucket.org` or one of its subdomains. It previously matched the text `bitbucket.org` anywhere, so `git@not-bitbucket.org:acme/widgets.git` targeted `acme/widgets` on Bitbucket. It also strips only a trailing `.git`, so `my.github-tools` is no longer read as `myhub-tools`. A blank or null `workspace`/`repo_slug` in the config is now filled from the remote like a missing one.
 - `approve-pr` (and any other bodyless POST) no longer fails with a 400: `api_request` sent `Content-Type: application/json` with an empty body, which Bitbucket rejects. The header is now sent only when there is a body.
 - Every command now validates its own arguments and exits with a specific error before any API call, instead of silently ignoring what it does not understand. Previously `create-pr --description-file x.md` dropped the flag and opened a PR with an empty description, `merge-pr 1 --strategy squash-all` merged with the default strategy, `pipelines 500` quietly returned one 100-row page, and a bare `get-pr` printed the usage block with no indication of what was wrong.
   - Unknown options, flags missing their value, and stray positional arguments (such as an unquoted `create-pr` title) are rejected everywhere.
