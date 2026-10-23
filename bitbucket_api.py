@@ -70,9 +70,9 @@ def load_config():
 
 def _resolve_repo(config):
     """Fill in workspace/repo_slug from the cwd's git remote where the config
-    leaves them out, so a loaded config is always ready for `api_request`.
-    Values set in the config take precedence over the remote."""
-    if "workspace" in config and "repo_slug" in config:
+    leaves them out or blank, so a loaded config is always ready for
+    `api_request`. Values set in the config take precedence over the remote."""
+    if config.get("workspace") and config.get("repo_slug"):
         return
     ws, repo = _detect_repo_info()
     if not (ws and repo):
@@ -87,8 +87,8 @@ def _resolve_repo(config):
             file=sys.stderr,
         )
         sys.exit(1)
-    config.setdefault("workspace", ws)
-    config.setdefault("repo_slug", repo)
+    config["workspace"] = config.get("workspace") or ws
+    config["repo_slug"] = config.get("repo_slug") or repo
 
 
 def _auth_header(config):
@@ -143,14 +143,25 @@ def _git(*args):
 
 
 def _parse_remote(remote):
-    # SSH: git@bitbucket.org:workspace/repo.git
-    # HTTPS: https://bitbucket.org/workspace/repo.git
-    if "bitbucket.org" in remote:
-        parts = remote.replace(".git", "").split("bitbucket.org")[-1]
-        parts = parts.lstrip(":/").split("/")
-        if len(parts) >= 2:
-            return parts[0], parts[1]
-    return None, None
+    """Return (workspace, repo_slug) for a Bitbucket Cloud remote, else
+    (None, None). The host must be bitbucket.org or one of its subdomains
+    (ssh.bitbucket.org), not merely contain the text."""
+    # URL: https://bitbucket.org/workspace/repo.git, ssh://git@bitbucket.org/...
+    # SCP: git@bitbucket.org:workspace/repo.git
+    if "://" in remote:
+        parsed = urllib.parse.urlsplit(remote)
+        host, path = parsed.hostname or "", parsed.path
+    else:
+        host, _, path = remote.partition(":")
+        host = host.rpartition("@")[2]
+    host = host.lower()
+    if host != "bitbucket.org" and not host.endswith(".bitbucket.org"):
+        return None, None
+    parts = path.strip("/").split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None, None
+    repo = parts[1][:-len(".git")] if parts[1].endswith(".git") else parts[1]
+    return parts[0], repo
 
 
 def _detect_repo_info():

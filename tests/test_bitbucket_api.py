@@ -27,6 +27,7 @@ from bitbucket_api import (
     _parse_list_prs_args,
     _parse_merge_pr_args,
     _parse_pipeline_log_args,
+    _parse_remote,
     _parse_pipelines_args,
     _parse_run_pipeline_args,
     _parse_update_pr_args,
@@ -729,6 +730,12 @@ class LoadConfigTest(unittest.TestCase):
 
         self.assertEqual(("upstream", "widgets"), (config["workspace"], config["repo_slug"]))
 
+    @patch("bitbucket_api._git", return_value="git@bitbucket.org:acme/widgets.git")
+    def test_blank_values_in_the_config_are_filled_from_the_remote(self, _git):
+        config = self._load({"app_password": "p", "workspace": "", "repo_slug": None})
+
+        self.assertEqual(("acme", "widgets"), (config["workspace"], config["repo_slug"]))
+
     @patch("bitbucket_api._git", return_value="")
     def test_exits_with_a_hint_outside_a_bitbucket_checkout(self, _git):
         stderr = io.StringIO()
@@ -737,6 +744,33 @@ class LoadConfigTest(unittest.TestCase):
             self._load({"app_password": "p"})
 
         self.assertIn("Could not detect workspace/repo", stderr.getvalue())
+
+
+class RemoteParsingTest(unittest.TestCase):
+    def test_parses_bitbucket_ssh_and_https_remotes(self):
+        cases = {
+            "git@bitbucket.org:acme/widgets.git": ("acme", "widgets"),
+            "git@ssh.bitbucket.org:acme/widgets.git": ("acme", "widgets"),
+            "ssh://git@altssh.bitbucket.org:443/acme/widgets.git": ("acme", "widgets"),
+            "https://user@bitbucket.org/acme/widgets.git": ("acme", "widgets"),
+            "https://bitbucket.org/acme/widgets": ("acme", "widgets"),
+            "git@bitbucket.org:acme/my.github-tools.git": ("acme", "my.github-tools"),
+        }
+        for remote, expected in cases.items():
+            with self.subTest(remote=remote):
+                self.assertEqual(expected, _parse_remote(remote))
+
+    def test_rejects_other_hosts_and_incomplete_paths(self):
+        for remote in (
+            "",
+            "git@github.com:acme/widgets.git",
+            "git@not-bitbucket.org:acme/widgets.git",
+            "https://evil.example/bitbucket.org/acme/widgets",
+            "https://bitbucket.org.evil.example/acme/widgets",
+            "git@bitbucket.org:acme",
+        ):
+            with self.subTest(remote=remote):
+                self.assertEqual((None, None), _parse_remote(remote))
 
 
 class PipelinesArgumentsTest(unittest.TestCase):
