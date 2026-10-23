@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Workspace/repo detection from the git remote now requires the host to be `bitbucket.org` or one of its subdomains. It previously matched the text `bitbucket.org` anywhere, so `git@not-bitbucket.org:acme/widgets.git` targeted `acme/widgets` on Bitbucket. It also strips only a trailing `.git`, so `my.github-tools` is no longer read as `myhub-tools`. A blank or null `workspace`/`repo_slug` in the config is now filled from the remote like a missing one.
 - `approve-pr` (and any other bodyless POST) no longer fails with a 400: `api_request` sent `Content-Type: application/json` with an empty body, which Bitbucket rejects. The header is now sent only when there is a body.
 - Every command now validates its own arguments and exits with a specific error before any API call, instead of silently ignoring what it does not understand. Previously `create-pr --description-file x.md` dropped the flag and opened a PR with an empty description, `merge-pr 1 --strategy squash-all` merged with the default strategy, `pipelines 500` quietly returned one 100-row page, and a bare `get-pr` printed the usage block with no indication of what was wrong.
   - Unknown options, flags missing their value, and stray positional arguments (such as an unquoted `create-pr` title) are rejected everywhere.
