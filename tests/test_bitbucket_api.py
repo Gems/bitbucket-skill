@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import tempfile
@@ -8,7 +9,7 @@ import urllib.error
 import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from bitbucket_api import (
     COMMANDS,
@@ -19,10 +20,14 @@ from bitbucket_api import (
     _fetch_pipeline_log,
     _paginated_values,
     _parse_add_comment_args,
+    _parse_comments_args,
     _parse_create_pr_args,
+    _parse_edit_comment_args,
+    _parse_get_pr_args,
     _parse_list_prs_args,
     _parse_merge_pr_args,
     _parse_pipeline_log_args,
+    _parse_remote,
     _parse_pipelines_args,
     _parse_run_pipeline_args,
     _parse_update_pr_args,
@@ -30,7 +35,12 @@ from bitbucket_api import (
     _resolve_pipeline_uuid,
     _single_positional,
     _single_pr_id,
+    load_config,
+    cmd_add_comment,
     cmd_approve_pr,
+    cmd_comments,
+    cmd_edit_comment,
+    cmd_get_pr,
     cmd_list_prs,
     cmd_pipeline,
     cmd_pr_commits,
@@ -411,14 +421,32 @@ class MergePullRequestArgumentsTest(unittest.TestCase):
 
 
 class AddCommentArgumentsTest(unittest.TestCase):
-    def test_joins_the_remaining_words_into_the_comment(self):
-        self.assertEqual(("42", "LGTM"), _parse_add_comment_args(["42", "LGTM"]))
+    def test_takes_the_body_from_a_flag_a_file_or_one_quoted_argument(self):
         self.assertEqual(
-            ("42", "ship it now"),
-            _parse_add_comment_args(["42", "ship", "it", "now"]),
+            ("42", "LGTM", None, None, False),
+            _parse_add_comment_args(["42", "--body", "LGTM"]),
+        )
+        path = _description_file(self, "## Finding\n\nDetails\n")
+        self.assertEqual(
+            ("42", "## Finding\n\nDetails\n", None, None, False),
+            _parse_add_comment_args(["42", "--body-file", path]),
         )
         self.assertEqual(
-            ("42", "--- a rule"), _parse_add_comment_args(["42", "---", "a", "rule"])
+            ("42", "ship it now", None, None, False),
+            _parse_add_comment_args(["42", "ship it now"]),
+        )
+        self.assertEqual(
+            ("42", "--- a rule", None, None, False),
+            _parse_add_comment_args(["42", "--- a rule"]),
+        )
+
+    def test_parses_an_inline_pending_draft(self):
+        self.assertEqual(
+            ("42", "Use DI", "src/Model.php", 45, True),
+            _parse_add_comment_args([
+                "42", "--path", "src/Model.php", "--line", "45",
+                "--pending", "--body", "Use DI",
+            ]),
         )
 
     def test_rejects_invalid_arguments(self):
@@ -426,14 +454,323 @@ class AddCommentArgumentsTest(unittest.TestCase):
             [],
             ["42"],
             ["42", "   "],
-            ["abc", "text"],
-            ["--text", "hi"],
+            ["42", "--body", " "],
+            ["abc", "--body", "text"],
+            ["--body", "hi"],
             ["42", "--file", "notes.md"],
+            ["42", "--body"],
+            ["42", "--body", "--pending"],
+            ["42", "--body", "a", "--body-file", "/tmp/b.md"],
+            ["42", "--body-file", "/nonexistent/comment.md"],
+            ["42", "text", "--body", "other"],
+            # Unquoted words are no longer joined: one of them could be an
+            # option meant as prose, or prose meant as an option.
+            ["42", "ship", "it", "now"],
+            ["42", "---", "a", "rule"],
+            ["42", "--body", "x", "--path", "src/a.py"],
+            ["42", "--body", "x", "--line", "3"],
+            ["42", "--body", "x", "--path", "src/a.py", "--line", "0"],
+            ["42", "--body", "x", "--path", "src/a.py", "--line", "three"],
+            ["42", "--body", "x", "--path"],
         ]
         for args in cases:
             with self.subTest(args=args):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     _parse_add_comment_args(args)
+
+
+class EditCommentArgumentsTest(unittest.TestCase):
+    def test_takes_the_new_body_from_a_flag_or_a_file(self):
+        self.assertEqual(
+            ("42", "886718944", "Reworded"),
+            _parse_edit_comment_args(["42", "886718944", "--body", "Reworded"]),
+        )
+        path = _description_file(self, "From file\n")
+        self.assertEqual(
+            ("42", "7", "From file\n"),
+            _parse_edit_comment_args(["42", "7", "--body-file", path]),
+        )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            [],
+            ["42"],
+            ["42", "--body", "x"],
+            ["42", "7"],
+            ["42", "abc", "--body", "x"],
+            ["42", "7", "--body"],
+            ["42", "7", "--body", " "],
+            ["42", "7", "--body", "a", "--body-file", "/tmp/b.md"],
+            ["42", "7", "Reworded"],
+            # A draft is never published by an edit: there is no flag for it.
+            ["42", "7", "--body", "x", "--pending"],
+            ["42", "7", "--body", "x", "--path", "src/a.py"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_edit_comment_args(args)
+
+
+class CommentsArgumentsTest(unittest.TestCase):
+    def test_parses_pending_only_and_json(self):
+        self.assertEqual(("42", False, False), _parse_comments_args("comments", ["42"]))
+        self.assertEqual(
+            ("42", True, True),
+            _parse_comments_args("comments", ["42", "--json", "--pending-only"]),
+        )
+
+    def test_rejects_invalid_arguments(self):
+        for args in ([], ["--json"], ["abc"], ["42", "43"], ["42", "--all"]):
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_comments_args("comments", args)
+
+
+class CommentCommandsTest(unittest.TestCase):
+    LONG_TEXT = "Finding. " + "x" * 2000 + " END"
+    DRAFT = {
+        "id": 886718944,
+        "pending": True,
+        "user": {"display_name": "Reviewer Name"},
+        "inline": {"path": "src/Validator.java", "from": None, "to": 932},
+        "created_on": "2026-10-21T10:12:33.000000+00:00",
+        "content": {"raw": LONG_TEXT},
+    }
+    PUBLISHED = {
+        "id": 886718700,
+        "pending": False,
+        "user": {"display_name": "Author Name"},
+        "parent": {"id": 886718600},
+        "created_on": "2026-10-20T08:00:00.000000+00:00",
+        "content": {"raw": "General remark"},
+    }
+
+    @patch("bitbucket_api._paginated_values")
+    def test_comments_prints_full_text_anchor_and_pending_state(
+            self, paginated_values):
+        paginated_values.return_value = [self.DRAFT, self.PUBLISHED]
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_comments({}, "42")
+
+        paginated_values.assert_called_once_with(
+            {}, "/pullrequests/42/comments?pagelen=100"
+        )
+        output = stdout.getvalue()
+        self.assertIn("## Comments on PR #42 (2)", output)
+        self.assertIn("### Comment 886718944", output)
+        self.assertIn(
+            "Pending: true | Author: Reviewer Name | "
+            "Where: src/Validator.java:932 | Created: 2026-10-21 10:12",
+            output,
+        )
+        self.assertIn(self.LONG_TEXT, output)
+        self.assertIn("Pending: false", output)
+        self.assertIn("Where: general", output)
+        self.assertIn("Reply to: 886718600", output)
+
+    @patch("bitbucket_api._paginated_values")
+    def test_pending_only_keeps_drafts_and_json_dumps_the_raw_objects(
+            self, paginated_values):
+        paginated_values.return_value = [self.DRAFT, self.PUBLISHED]
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_comments({}, "42", pending_only=True, as_json=True)
+
+        self.assertEqual([self.DRAFT], json.loads(stdout.getvalue()))
+
+    @patch("bitbucket_api._paginated_values", return_value=[])
+    def test_reports_when_there_are_no_drafts(self, paginated_values):
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_comments({}, "42", pending_only=True)
+
+        self.assertEqual("No pending comments on PR #42.\n", stdout.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_add_comment_posts_an_inline_pending_draft(self, api_request):
+        api_request.return_value = dict(self.DRAFT, content={"raw": "Use DI"})
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_add_comment({}, "42", "Use DI", "src/Validator.java", 932, True)
+
+        api_request.assert_called_once_with(
+            {},
+            "/pullrequests/42/comments",
+            method="POST",
+            data={
+                "content": {"raw": "Use DI"},
+                "inline": {"path": "src/Validator.java", "to": 932},
+                "pending": True,
+            },
+        )
+        self.assertIn("Added comment 886718944 to PR #42", stdout.getvalue())
+        self.assertIn(
+            "Pending: true | Where: src/Validator.java:932", stdout.getvalue()
+        )
+
+    @patch("bitbucket_api.api_request")
+    def test_add_comment_without_pending_sends_no_pending_field(self, api_request):
+        api_request.return_value = self.PUBLISHED
+
+        with redirect_stdout(io.StringIO()):
+            cmd_add_comment({}, "42", "General remark")
+
+        self.assertEqual(
+            {"content": {"raw": "General remark"}},
+            api_request.call_args.kwargs["data"],
+        )
+
+    @patch("bitbucket_api.api_request")
+    def test_add_comment_fails_when_a_draft_comes_back_published(self, api_request):
+        api_request.return_value = dict(self.DRAFT, pending=False)
+        stderr = io.StringIO()
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(stderr), \
+                self.assertRaises(SystemExit):
+            cmd_add_comment({}, "42", "Use DI", pending=True)
+
+        self.assertIn("Bitbucket published it", stderr.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_edit_comment_sends_only_the_text_and_confirms_it_stayed_pending(
+            self, api_request):
+        api_request.side_effect = [
+            self.DRAFT, {}, dict(self.DRAFT, content={"raw": "Reworded"}),
+        ]
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_edit_comment({}, "42", "886718944", "Reworded")
+
+        path = "/pullrequests/42/comments/886718944"
+        self.assertEqual(
+            [
+                call({}, path),
+                call({}, path, method="PUT", data={"content": {"raw": "Reworded"}}),
+                call({}, path),
+            ],
+            api_request.call_args_list,
+        )
+        self.assertIn(
+            "Pending: true (unchanged) | Where: src/Validator.java:932 (unchanged)",
+            stdout.getvalue(),
+        )
+
+    @patch("bitbucket_api.api_request")
+    def test_edit_comment_fails_loudly_when_the_draft_was_published(
+            self, api_request):
+        api_request.side_effect = [self.DRAFT, {}, dict(self.DRAFT, pending=False)]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr), \
+                self.assertRaises(SystemExit):
+            cmd_edit_comment({}, "42", "886718944", "Reworded")
+
+        self.assertIn("Pending: true → false (CHANGED)", stdout.getvalue())
+        self.assertIn("changed its Pending", stderr.getvalue())
+
+
+class GetPullRequestTest(unittest.TestCase):
+    PR = {
+        "id": 42,
+        "title": "feat: x",
+        "state": "OPEN",
+        "source": {"branch": {"name": "feature/x"}},
+        "destination": {"branch": {"name": "main"}},
+        "links": {"html": {"href": "https://bitbucket.org/acme/widgets/pull-requests/42"}},
+        "description": "Summary. " + "y" * 1000 + " TAIL",
+    }
+
+    def test_parses_full(self):
+        self.assertEqual(("42", False), _parse_get_pr_args(["42"]))
+        self.assertEqual(("42", True), _parse_get_pr_args(["42", "--full"]))
+        for args in ([], ["--full"], ["42", "43"], ["42", "--all"]):
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_get_pr_args(args)
+
+    @patch("bitbucket_api.api_request")
+    def test_previews_the_description_unless_full(self, api_request):
+        api_request.return_value = self.PR
+        preview, full = io.StringIO(), io.StringIO()
+
+        with redirect_stdout(preview):
+            cmd_get_pr({}, "42")
+        with redirect_stdout(full):
+            cmd_get_pr({}, "42", full=True)
+
+        self.assertNotIn("TAIL", preview.getvalue())
+        self.assertIn("first 500 of 1014 chars; pass --full", preview.getvalue())
+        self.assertIn(self.PR["description"], full.getvalue())
+        self.assertNotIn("pass --full", full.getvalue())
+
+
+class LoadConfigTest(unittest.TestCase):
+    def _load(self, config):
+        path = _description_file(self, json.dumps(config))
+        with patch("bitbucket_api.CONFIG_PATHS", [path]):
+            return load_config()
+
+    @patch("bitbucket_api._git", return_value="git@ssh.bitbucket.org:acme/widgets.git")
+    def test_fills_workspace_and_repo_from_the_git_remote(self, _git):
+        config = self._load({"username": "u", "app_password": "p"})
+
+        self.assertEqual(("acme", "widgets"), (config["workspace"], config["repo_slug"]))
+
+    @patch("bitbucket_api._git", return_value="git@bitbucket.org:acme/widgets.git")
+    def test_values_in_the_config_take_precedence(self, _git):
+        config = self._load({"app_password": "p", "workspace": "upstream"})
+
+        self.assertEqual(("upstream", "widgets"), (config["workspace"], config["repo_slug"]))
+
+    @patch("bitbucket_api._git", return_value="git@bitbucket.org:acme/widgets.git")
+    def test_blank_values_in_the_config_are_filled_from_the_remote(self, _git):
+        config = self._load({"app_password": "p", "workspace": "", "repo_slug": None})
+
+        self.assertEqual(("acme", "widgets"), (config["workspace"], config["repo_slug"]))
+
+    @patch("bitbucket_api._git", return_value="")
+    def test_exits_with_a_hint_outside_a_bitbucket_checkout(self, _git):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            self._load({"app_password": "p"})
+
+        self.assertIn("Could not detect workspace/repo", stderr.getvalue())
+
+
+class RemoteParsingTest(unittest.TestCase):
+    def test_parses_bitbucket_ssh_and_https_remotes(self):
+        cases = {
+            "git@bitbucket.org:acme/widgets.git": ("acme", "widgets"),
+            "git@ssh.bitbucket.org:acme/widgets.git": ("acme", "widgets"),
+            "ssh://git@altssh.bitbucket.org:443/acme/widgets.git": ("acme", "widgets"),
+            "https://user@bitbucket.org/acme/widgets.git": ("acme", "widgets"),
+            "https://bitbucket.org/acme/widgets": ("acme", "widgets"),
+            "git@bitbucket.org:acme/my.github-tools.git": ("acme", "my.github-tools"),
+        }
+        for remote, expected in cases.items():
+            with self.subTest(remote=remote):
+                self.assertEqual(expected, _parse_remote(remote))
+
+    def test_rejects_other_hosts_and_incomplete_paths(self):
+        for remote in (
+            "",
+            "git@github.com:acme/widgets.git",
+            "git@not-bitbucket.org:acme/widgets.git",
+            "https://evil.example/bitbucket.org/acme/widgets",
+            "https://bitbucket.org.evil.example/acme/widgets",
+            "git@bitbucket.org:acme",
+        ):
+            with self.subTest(remote=remote):
+                self.assertEqual((None, None), _parse_remote(remote))
 
 
 class PipelinesArgumentsTest(unittest.TestCase):
