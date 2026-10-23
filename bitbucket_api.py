@@ -787,7 +787,8 @@ def cmd_edit_comment(config, pr_id, comment_id, text):
     state and anchor did not change."""
     path = f"/pullrequests/{pr_id}/comments/{comment_id}"
     before = api_request(config, path)
-    # Only the text is sent, so the PUT cannot publish a draft or move it.
+    # The PUT accepts only `content`; adding `inline` or `pending` gets a 400
+    # ("extra keys not allowed"), so moving an anchor means delete + re-create.
     api_request(config, path, method="PUT", data={"content": {"raw": text}})
     after = api_request(config, path)
 

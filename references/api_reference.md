@@ -114,6 +114,10 @@ curl -X PUT -u "$USER:$PASS" \
 ```
 
 Sending only `content` leaves the pending state and inline anchor unchanged.
+`content` is the only field the PUT accepts: a body with `inline` or `pending`
+returns 400 `"extra keys not allowed"` and changes nothing, even when it
+repeats the current anchor. To move a comment to another line or file, delete
+it and create it again; a PUT cannot publish a draft either.
 
 ## Pipelines API
 
