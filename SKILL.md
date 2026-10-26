@@ -239,7 +239,8 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" comments 123 --pending-only
   `Pending: true|false | Author | Where | Created` line (plus `Reply to: <id>`
   for a reply), then its full untruncated text and an `<<<END>>>` line.
 - `Where` is `path:line` for an inline comment (`path:N (old side)` on a
-  removed line) and `general` otherwise.
+  removed line), `path (file)` for a comment on a whole file, and `general`
+  otherwise.
 - `--pending-only` keeps only pending comments: your own unsubmitted review
   drafts, which only their author can see.
 - `--json` prints the raw comment objects (after `--pending-only`, if given).
@@ -278,21 +279,32 @@ and **PR Description Formatting** below, then apply with `update-pr`:
 
 ### Add Comment to PR
 
-**Trigger**: `/bitbucket add-comment <ID> <text>`, "comment on line N of FILE", "leave a draft comment"
+**Trigger**: `/bitbucket add-comment <ID> <text>`, "comment on line N of FILE", "leave a draft comment", "reply to the PR comments"
 
 ```bash
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 --path src/Model.php --line 45 --pending --body-file /tmp/finding.md
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 --path src/OldTests.java --old-line 120 --pending --body-file /tmp/why-removed.md
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 --reply-to 886718944 --body-file /tmp/answer.md
 ```
 
 - `--body TEXT` or `--body-file PATH` — the comment (markdown). Use a file for
   anything multi-line. A single quoted TEXT after the ID still works in place
   of `--body`; unquoted words are rejected rather than joined.
 - `--path FILE --line N` — anchor it inline on line N of the PR's new version
-  of FILE (both or neither).
+  of FILE.
+- `--path FILE --old-line N` — anchor it on line N of the PR's old version of
+  FILE: the place for a comment on a removed line, or on a file the PR deletes.
+- `--path FILE` alone — a comment on the file as a whole.
+- `--reply-to COMMENT_ID` — post it as a reply in that comment's thread (take
+  the id from `comments`). A reply takes its anchor from the parent, so it
+  cannot be combined with `--path`/`--line`/`--old-line`.
 - `--pending` — save it as a draft of your review, visible only to you until
   the review is submitted. Without it the comment is published at once.
-- Prints the new comment's id and its `Pending`/`Where` state; exits non-zero
-  if a `--pending` comment came back published.
+- Prints the new comment's id and its `Pending`/`Where` state, plus
+  `Reply to: <id>` for a reply; exits non-zero if a `--pending` comment came
+  back published.
+- Posting dozens of comments? Follow **Bulk Operations** below: Bitbucket
+  refuses a burst of comment POSTs with a 429.
 
 ### Edit a Comment
 
@@ -625,6 +637,58 @@ echo -e 'src/Model.php\t45\tUse DI here\nsrc/Controller.php\t120\tAdd try/catch'
 Scripts auto-detect credentials from the config associated with their own
 installation path or environment variables (`BB_WORKSPACE`, `BB_REPO`,
 `BB_USER`, `BB_APP_PASSWORD`).
+
+## Bulk Operations
+
+Bitbucket Cloud rate-limits each user or token: `/2.0/repositories/*` allows
+1,000 requests per rolling hour on most workspaces
+([API request limits](https://support.atlassian.com/bitbucket-cloud/docs/api-request-limits/)),
+and posting comments has a tighter burst limit that Atlassian does not
+document. On October 26, 2026, 133 back-to-back `add-comment` calls went
+through and the 134th got `Error 429: Rate limit for this resource has been
+exceeded`; 279 calls with a 3 s pause after each went through without a 429.
+
+For dozens of comments, replies or edits in one go:
+
+- **Check what already exists, so a rerun is idempotent.** Read
+  `comments <ID> --json` and drop every planned comment that already has a
+  match, pending or published: same `inline.path` and
+  `inline.to`/`inline.from` (or `parent.id` for a reply) and same text. Do
+  not narrow it to `--pending-only`: an `add-comment --pending` whose draft
+  came back published fails, yet the comment exists. A rerun after a failure
+  then posts only what is missing instead of duplicating comments.
+- **One call at a time, with a pause.** Never run the calls in parallel, and
+  `sleep 3` after each write. Atlassian asks for at least 1 s between
+  POST/PUT/DELETE requests; 3 s is what held for 279 comments.
+- **A 429 is retried for you.** Every command resends a request refused with
+  429: after `Retry-After` seconds when Bitbucket sends that header (up to
+  300 s; a longer one fails at once), otherwise after 30, 60, 120 and 240 s.
+  Each wait is reported on stderr as `Rate limited (429) on POST …; retry 1 of
+  4 in 30 s`; after the fifth refusal the command fails with `Error 429` and
+  exit code 1. One call can thus block for about 7.5 minutes, so run a long
+  loop in the background rather than under a short command timeout.
+- **Stop at the first failure**, of the listing or of any write, with a
+  non-zero exit status, and rerun once the cause is fixed; the check above
+  makes that safe.
+
+```bash
+(
+  set -e  # any failure ends the run with that command's exit status
+  B="$BITBUCKET_SKILL/bitbucket_api.py"
+  python3 "$B" comments 542 --json > /tmp/existing.json
+  # Write /tmp/todo.tsv (file<TAB>line<TAB>body-file) from the plan, minus what existing.json already has.
+  # `|| [ -n "$file" ]` keeps a last row that has no trailing newline.
+  while IFS=$'\t' read -r file line body || [ -n "$file" ]; do
+    python3 "$B" add-comment 542 --pending --path "$file" --line "$line" --body-file "$body"
+    sleep 3
+  done < /tmp/todo.tsv
+)
+```
+
+Do not name a loop variable `path`: in zsh it is tied to `PATH`.
+
+`bb-review.sh` pauses only 0.5 s between comments and does not retry a 429:
+for more than a few dozen comments, use the loop above instead.
 
 ## Direct API Reference
 

@@ -2,15 +2,19 @@
 """Lightweight Bitbucket CLI for Claude Code. Uses Bitbucket Cloud REST API 2.0."""
 
 import json
+import math
 import sys
 import os
 import ssl
 import subprocess
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
 import base64
 from collections import deque
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 
 def _config_paths(script_path=None):
@@ -108,7 +112,9 @@ def _auth_header(config):
 
 def api_request(config, path, method="GET", data=None, allow_404=False):
     """Call the API, exiting on any error. With allow_404, a missing resource
-    returns None instead so the caller can try another lookup."""
+    returns None instead so the caller can try another lookup. A 429 is
+    retried after the wait `_rate_limit_wait` picks, RATE_LIMIT_RETRIES times
+    at most."""
     workspace = config["workspace"]
     repo_slug = config["repo_slug"]
     url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}{path}"
@@ -121,16 +127,98 @@ def api_request(config, path, method="GET", data=None, allow_404=False):
         # A bodyless POST (approve, decline) must not claim JSON: Bitbucket
         # rejects the empty body with a 400.
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    retry = 0
+    while True:
+        req = urllib.request.Request(url, data=body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, context=SSL_CTX) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if allow_404 and e.code == 404:
+                return None
+            body_text = e.read().decode() if e.fp else ""
+            e.close()  # free the connection before a retry
+            if e.code != 429:
+                print(f"Error {e.code}: {body_text[:500]}", file=sys.stderr)
+                sys.exit(1)
+            retry += 1
+            _wait_out_rate_limit(f"{method} {path}", e.headers or {}, retry, body_text)
+
+
+# Bitbucket Cloud answers 429 once a rate limit is spent: 1,000 requests per
+# rolling hour on /2.0/repositories/*, and an undocumented, tighter burst
+# limit on posting comments. A 429 is a refusal, so resending the request -
+# a POST included - cannot apply it twice.
+RATE_LIMIT_RETRIES = 4
+RATE_LIMIT_FIRST_WAIT = 30  # seconds, when there is no Retry-After; doubles per retry
+RATE_LIMIT_MAX_WAIT = 300   # the longest single wait, Retry-After included
+RATE_LIMIT_HEADERS = (
+    "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Resource",
+    "X-RateLimit-NearLimit",
+)
+
+
+def _retry_after_seconds(value, now=None):
+    """Seconds a Retry-After value asks to wait - delta-seconds or an
+    HTTP-date - or None when it is missing or unreadable."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return int(value)
     try:
-        with urllib.request.urlopen(req, context=SSL_CTX) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if allow_404 and e.code == 404:
-            return None
-        body_text = e.read().decode() if e.fp else ""
-        print(f"Error {e.code}: {body_text[:500]}", file=sys.stderr)
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = time.time() if now is None else now
+    return max(0, math.ceil(when.timestamp() - now))
+
+
+def _rate_limit_wait(headers, retry):
+    """Seconds to wait before retry number `retry` (from 1): what Retry-After
+    asks, else 30 s doubling per retry, capped at RATE_LIMIT_MAX_WAIT."""
+    asked = _retry_after_seconds(headers.get("Retry-After"))
+    if asked is not None:
+        return asked
+    return min(RATE_LIMIT_FIRST_WAIT * 2 ** (retry - 1), RATE_LIMIT_MAX_WAIT)
+
+
+def _wait_out_rate_limit(request, headers, retry, body_text):
+    """Sleep before retrying a request Bitbucket refused with 429, or exit
+    once the retries are spent or Retry-After asks for more than
+    RATE_LIMIT_MAX_WAIT. Every message names the rate-limit headers that came
+    back, since Atlassian does not document which ones a 429 carries."""
+    seen = ", ".join(
+        f"{name}: {headers.get(name)}" for name in RATE_LIMIT_HEADERS
+        if headers.get(name)
+    ) or "none"
+    wait = _rate_limit_wait(headers, retry)
+    if retry > RATE_LIMIT_RETRIES:
+        print(f"Error 429: {body_text[:500]}", file=sys.stderr)
+        print(
+            f"Gave up on {request} after {retry} attempts "
+            f"[rate-limit headers: {seen}]. Wait a few minutes, then rerun; "
+            "for a bulk run, see \"Bulk Operations\" in SKILL.md.",
+            file=sys.stderr,
+        )
         sys.exit(1)
+    if wait > RATE_LIMIT_MAX_WAIT:
+        print(f"Error 429: {body_text[:500]}", file=sys.stderr)
+        print(
+            f"Bitbucket asks to retry {request} in {wait} s, longer than the "
+            f"{RATE_LIMIT_MAX_WAIT} s this CLI waits [rate-limit headers: {seen}]. "
+            "Rerun after that.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(
+        f"Rate limited (429) on {request}; retry {retry} of {RATE_LIMIT_RETRIES} "
+        f"in {wait} s [rate-limit headers: {seen}]",
+        file=sys.stderr,
+    )
+    time.sleep(wait)
 
 
 def _git(*args):
@@ -610,7 +698,8 @@ def cmd_decline_pr(config, pr_id):
 # side effect of reading, adding, or editing comments.
 
 def _comment_anchor(comment):
-    """Where a comment sits: `path:line` when inline, `general` otherwise."""
+    """Where a comment sits: `path:line` when inline, `path (file)` on a whole
+    file, `general` otherwise."""
     inline = comment.get("inline")
     if not inline:
         return "general"
@@ -619,7 +708,7 @@ def _comment_anchor(comment):
         return f"{path}:{inline['to']}"
     if inline.get("from") is not None:
         return f"{path}:{inline['from']} (old side)"
-    return path
+    return f"{path} (file)"
 
 
 def _comment_pending(comment):
@@ -691,7 +780,9 @@ def _parse_add_comment_args(args):
     text = None
     path = None
     line = None
+    old_line = None
     pending = False
+    reply_to = None
     index = 0
     while index < len(rest):
         arg = rest[index]
@@ -700,14 +791,24 @@ def _parse_add_comment_args(args):
                 "add-comment", rest, index, text is not None, COMMENT_BODY_FLAGS
             )
             index += 2
+        elif arg == "--reply-to":
+            reply_to = int(
+                _validate_comment_id(
+                    "add-comment --reply-to", _option_value(rest, index, "a comment id")
+                )
+            )
+            index += 2
         elif arg == "--path":
             path = _option_value(rest, index, "a file path")
             index += 2
-        elif arg == "--line":
+        elif arg in ("--line", "--old-line"):
             value = _option_value(rest, index, "a line number")
             if not value.isdigit() or int(value) < 1:
-                _fail(f"--line requires a positive line number, got {value!r}")
-            line = int(value)
+                _fail(f"{arg} requires a positive line number, got {value!r}")
+            if arg == "--line":
+                line = int(value)
+            else:
+                old_line = int(value)
             index += 2
         elif arg == "--pending":
             pending = True
@@ -729,24 +830,45 @@ def _parse_add_comment_args(args):
         _fail("add-comment requires --body TEXT or --body-file PATH")
     if not text.strip():
         _fail("add-comment requires non-empty comment text")
-    if (path is None) != (line is None):
-        _fail("an inline comment needs both --path and --line")
-    return pr_id, text, path, line, pending
+    if line is not None and old_line is not None:
+        # One comment sits on one side of the diff.
+        _fail("pass --line (new side) or --old-line (old side), not both")
+    if path is None and (line is not None or old_line is not None):
+        _fail("an inline comment needs --path with --line or --old-line")
+    if reply_to is not None and path is not None:
+        # A reply sits in its parent's thread, so it takes the parent's anchor.
+        _fail("a reply takes its place from the parent comment; drop --path/--line")
+    return pr_id, text, path, line, pending, reply_to, old_line
 
 
-def cmd_add_comment(config, pr_id, text, path=None, line=None, pending=False):
-    """Add a general or inline comment to a PR, as a pending draft when
-    `pending` is set."""
+def cmd_add_comment(
+    config, pr_id, text, path=None, line=None, pending=False, reply_to=None,
+    old_line=None,
+):
+    """Add a general, file or inline comment to a PR, or a reply to the comment
+    `reply_to`, as a pending draft when `pending` is set. An inline comment
+    sits on `line` of the new version or on `old_line` of the old one; with
+    neither, it sits on the file `path` as a whole."""
     payload = {"content": {"raw": text}}
     if path is not None:
-        payload["inline"] = {"path": path, "to": line}
+        payload["inline"] = {"path": path}
+        if line is not None:
+            payload["inline"]["to"] = line
+        if old_line is not None:
+            payload["inline"]["from"] = old_line
+    if reply_to is not None:
+        payload["parent"] = {"id": reply_to}
     if pending:
         payload["pending"] = True
     data = api_request(
         config, f"/pullrequests/{pr_id}/comments", method="POST", data=payload
     )
     print(f"Added comment {data.get('id', '—')} to PR #{pr_id}")
-    print(f"Pending: {_comment_pending(data)} | Where: {_comment_anchor(data)}")
+    details = f"Pending: {_comment_pending(data)} | Where: {_comment_anchor(data)}"
+    parent = (data.get("parent") or {}).get("id")
+    if parent:
+        details += f" | Reply to: {parent}"
+    print(details)
     if pending and not data.get("pending"):
         _fail(
             f"comment {data.get('id')} was sent as a draft, "
@@ -1283,8 +1405,10 @@ Commands:
                                      List PR comments with full text, anchor and
                                      pending state (alias: pr-comments)
   add-comment <ID> (--body TEXT | --body-file PATH)
-              [--path FILE --line N] [--pending]
-                                     Add a general or inline comment (--pending: a draft)
+              [--path FILE [--line N | --old-line N] | --reply-to COMMENT_ID]
+              [--pending]            Add a general, file or inline comment, or a
+                                     reply (--old-line: on the old side;
+                                     --pending: a draft)
   edit-comment <ID> <COMMENT_ID> (--body TEXT | --body-file PATH)
                                      Replace a comment's text, keeping it pending/inline
   pipelines [COUNT]                  List recent pipelines
@@ -1361,8 +1485,7 @@ def main():
         cmd_comments(config, pr_id, pending_only, as_json)
 
     elif cmd == "add-comment":
-        pr_id, text, path, line, pending = _parse_add_comment_args(args)
-        cmd_add_comment(config, pr_id, text, path, line, pending)
+        cmd_add_comment(config, *_parse_add_comment_args(args))
 
     elif cmd == "edit-comment":
         pr_id, comment_id, text = _parse_edit_comment_args(args)
