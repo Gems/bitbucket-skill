@@ -2,15 +2,19 @@
 """Lightweight Bitbucket CLI for Claude Code. Uses Bitbucket Cloud REST API 2.0."""
 
 import json
+import math
 import sys
 import os
 import ssl
 import subprocess
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
 import base64
 from collections import deque
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 
 def _config_paths(script_path=None):
@@ -108,7 +112,9 @@ def _auth_header(config):
 
 def api_request(config, path, method="GET", data=None, allow_404=False):
     """Call the API, exiting on any error. With allow_404, a missing resource
-    returns None instead so the caller can try another lookup."""
+    returns None instead so the caller can try another lookup. A 429 is
+    retried after the wait `_rate_limit_wait` picks, RATE_LIMIT_RETRIES times
+    at most."""
     workspace = config["workspace"]
     repo_slug = config["repo_slug"]
     url = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}{path}"
@@ -121,16 +127,98 @@ def api_request(config, path, method="GET", data=None, allow_404=False):
         # A bodyless POST (approve, decline) must not claim JSON: Bitbucket
         # rejects the empty body with a 400.
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    retry = 0
+    while True:
+        req = urllib.request.Request(url, data=body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, context=SSL_CTX) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if allow_404 and e.code == 404:
+                return None
+            body_text = e.read().decode() if e.fp else ""
+            e.close()  # free the connection before a retry
+            if e.code != 429:
+                print(f"Error {e.code}: {body_text[:500]}", file=sys.stderr)
+                sys.exit(1)
+            retry += 1
+            _wait_out_rate_limit(f"{method} {path}", e.headers or {}, retry, body_text)
+
+
+# Bitbucket Cloud answers 429 once a rate limit is spent: 1,000 requests per
+# rolling hour on /2.0/repositories/*, and an undocumented, tighter burst
+# limit on posting comments. A 429 is a refusal, so resending the request -
+# a POST included - cannot apply it twice.
+RATE_LIMIT_RETRIES = 4
+RATE_LIMIT_FIRST_WAIT = 30  # seconds, when there is no Retry-After; doubles per retry
+RATE_LIMIT_MAX_WAIT = 300   # the longest single wait, Retry-After included
+RATE_LIMIT_HEADERS = (
+    "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Resource",
+    "X-RateLimit-NearLimit",
+)
+
+
+def _retry_after_seconds(value, now=None):
+    """Seconds a Retry-After value asks to wait - delta-seconds or an
+    HTTP-date - or None when it is missing or unreadable."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return int(value)
     try:
-        with urllib.request.urlopen(req, context=SSL_CTX) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if allow_404 and e.code == 404:
-            return None
-        body_text = e.read().decode() if e.fp else ""
-        print(f"Error {e.code}: {body_text[:500]}", file=sys.stderr)
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = time.time() if now is None else now
+    return max(0, math.ceil(when.timestamp() - now))
+
+
+def _rate_limit_wait(headers, retry):
+    """Seconds to wait before retry number `retry` (from 1): what Retry-After
+    asks, else 30 s doubling per retry, capped at RATE_LIMIT_MAX_WAIT."""
+    asked = _retry_after_seconds(headers.get("Retry-After"))
+    if asked is not None:
+        return asked
+    return min(RATE_LIMIT_FIRST_WAIT * 2 ** (retry - 1), RATE_LIMIT_MAX_WAIT)
+
+
+def _wait_out_rate_limit(request, headers, retry, body_text):
+    """Sleep before retrying a request Bitbucket refused with 429, or exit
+    once the retries are spent or Retry-After asks for more than
+    RATE_LIMIT_MAX_WAIT. Every message names the rate-limit headers that came
+    back, since Atlassian does not document which ones a 429 carries."""
+    seen = ", ".join(
+        f"{name}: {headers.get(name)}" for name in RATE_LIMIT_HEADERS
+        if headers.get(name)
+    ) or "none"
+    wait = _rate_limit_wait(headers, retry)
+    if retry > RATE_LIMIT_RETRIES:
+        print(f"Error 429: {body_text[:500]}", file=sys.stderr)
+        print(
+            f"Gave up on {request} after {retry} attempts "
+            f"[rate-limit headers: {seen}]. Wait a few minutes, then rerun; "
+            "for a bulk run, see \"Bulk Operations\" in SKILL.md.",
+            file=sys.stderr,
+        )
         sys.exit(1)
+    if wait > RATE_LIMIT_MAX_WAIT:
+        print(f"Error 429: {body_text[:500]}", file=sys.stderr)
+        print(
+            f"Bitbucket asks to retry {request} in {wait} s, longer than the "
+            f"{RATE_LIMIT_MAX_WAIT} s this CLI waits [rate-limit headers: {seen}]. "
+            "Rerun after that.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(
+        f"Rate limited (429) on {request}; retry {retry} of {RATE_LIMIT_RETRIES} "
+        f"in {wait} s [rate-limit headers: {seen}]",
+        file=sys.stderr,
+    )
+    time.sleep(wait)
 
 
 def _git(*args):
