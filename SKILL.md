@@ -651,11 +651,12 @@ exceeded`; 279 calls with a 3 s pause after each went through without a 429.
 For dozens of comments, replies or edits in one go:
 
 - **Check what already exists, so a rerun is idempotent.** Read
-  `comments <ID> --pending-only --json` (without `--pending-only` for
-  published comments) and drop every planned comment that already has a
-  match: same `inline.path` and `inline.to`/`inline.from` (or `parent.id` for
-  a reply) and same text. A rerun after a failure then posts only what is
-  missing instead of duplicating drafts.
+  `comments <ID> --json` and drop every planned comment that already has a
+  match, pending or published: same `inline.path` and
+  `inline.to`/`inline.from` (or `parent.id` for a reply) and same text. Do
+  not narrow it to `--pending-only`: an `add-comment --pending` whose draft
+  came back published fails, yet the comment exists. A rerun after a failure
+  then posts only what is missing instead of duplicating comments.
 - **One call at a time, with a pause.** Never run the calls in parallel, and
   `sleep 3` after each write. Atlassian asks for at least 1 s between
   POST/PUT/DELETE requests; 3 s is what held for 279 comments.
@@ -666,18 +667,24 @@ For dozens of comments, replies or edits in one go:
   4 in 30 s`; after the fifth refusal the command fails with `Error 429` and
   exit code 1. One call can thus block for about 7.5 minutes, so run a long
   loop in the background rather than under a short command timeout.
-- **Stop at the first failure** and rerun once the cause is fixed; the check
-  above makes that safe.
+- **Stop at the first failure**, of the listing or of any write, with a
+  non-zero exit status, and rerun once the cause is fixed; the check above
+  makes that safe.
 
 ```bash
-B="$BITBUCKET_SKILL/bitbucket_api.py"
-python3 "$B" comments 542 --pending-only --json > /tmp/existing.json
-# /tmp/todo.tsv: path<TAB>line<TAB>body-file, without what existing.json already has
-while IFS=$'\t' read -r path line body; do
-  python3 "$B" add-comment 542 --pending --path "$path" --line "$line" --body-file "$body" || break
-  sleep 3
-done < /tmp/todo.tsv
+(
+  set -e  # any failure ends the run with that command's exit status
+  B="$BITBUCKET_SKILL/bitbucket_api.py"
+  python3 "$B" comments 542 --json > /tmp/existing.json
+  # Write /tmp/todo.tsv (file<TAB>line<TAB>body-file) from the plan, minus what existing.json already has.
+  while IFS=$'\t' read -r file line body; do
+    python3 "$B" add-comment 542 --pending --path "$file" --line "$line" --body-file "$body"
+    sleep 3
+  done < /tmp/todo.tsv
+)
 ```
+
+Do not name a loop variable `path`: in zsh it is tied to `PATH`.
 
 `bb-review.sh` pauses only 0.5 s between comments and does not retry a 429:
 for more than a few dozen comments, use the loop above instead.
