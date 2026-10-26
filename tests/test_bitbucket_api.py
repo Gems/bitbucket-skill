@@ -1,3 +1,4 @@
+import email.message
 import io
 import json
 import os
@@ -8,6 +9,7 @@ import unittest
 import urllib.error
 import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import call, patch
 
@@ -34,6 +36,7 @@ from bitbucket_api import (
     _parse_update_pr_args,
     _read_log_lines,
     _resolve_pipeline_uuid,
+    _retry_after_seconds,
     _single_positional,
     _single_pr_id,
     load_config,
@@ -248,6 +251,106 @@ class ApiRequestHeadersTest(unittest.TestCase):
             self.assertEqual(
                 {}, api_request(config, "/pullrequests/1/comments/7", method="DELETE")
             )
+
+
+class ApiRequestRateLimitTest(unittest.TestCase):
+    def setUp(self):
+        patch("bitbucket_api._auth_header", return_value="Basic x").start()
+        self.urlopen = patch("bitbucket_api.urllib.request.urlopen").start()
+        self.sleep = patch("bitbucket_api.time.sleep").start()
+        self.addCleanup(patch.stopall)
+        self.stderr = io.StringIO()
+
+    @staticmethod
+    def _rate_limited(retry_after=None):
+        headers = email.message.Message()
+        if retry_after is not None:
+            headers["Retry-After"] = retry_after
+        return urllib.error.HTTPError(
+            "https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/42/comments",
+            429, "Too Many Requests", headers,
+            io.BytesIO(b"Rate limit for this resource has been exceeded"),
+        )
+
+    def _post_comment(self):
+        with redirect_stderr(self.stderr):
+            return api_request(
+                {"workspace": "ws", "repo_slug": "repo"}, "/pullrequests/42/comments",
+                method="POST", data={"content": {"raw": "Why"}},
+            )
+
+    def _waits(self):
+        return [sleep.args[0] for sleep in self.sleep.call_args_list]
+
+    def test_waits_as_long_as_retry_after_says_then_resends_the_request(self):
+        self.urlopen.side_effect = [
+            self._rate_limited(retry_after="7"), io.BytesIO(b'{"id": 1}'),
+        ]
+
+        self.assertEqual({"id": 1}, self._post_comment())
+
+        self.assertEqual([7], self._waits())
+        resent = self.urlopen.call_args.args[0]
+        self.assertEqual(
+            ("POST", b'{"content": {"raw": "Why"}}'), (resent.get_method(), resent.data)
+        )
+        self.assertIn(
+            "Rate limited (429) on POST /pullrequests/42/comments; retry 1 of 4 "
+            "in 7 s [rate-limit headers: Retry-After: 7]",
+            self.stderr.getvalue(),
+        )
+
+    def test_backs_off_exponentially_without_retry_after(self):
+        self.urlopen.side_effect = [self._rate_limited() for _ in range(3)] + [
+            io.BytesIO(b"{}")
+        ]
+
+        self.assertEqual({}, self._post_comment())
+
+        self.assertEqual([30, 60, 120], self._waits())
+        self.assertIn("[rate-limit headers: none]", self.stderr.getvalue())
+
+    def test_fails_with_the_server_message_once_the_retries_are_spent(self):
+        self.urlopen.side_effect = [self._rate_limited() for _ in range(5)]
+
+        with self.assertRaises(SystemExit) as raised:
+            self._post_comment()
+
+        self.assertEqual(1, raised.exception.code)
+        self.assertEqual(5, self.urlopen.call_count)
+        self.assertEqual([30, 60, 120, 240], self._waits())
+        self.assertIn(
+            "Error 429: Rate limit for this resource has been exceeded\n"
+            "Gave up on POST /pullrequests/42/comments after 5 attempts",
+            self.stderr.getvalue(),
+        )
+
+    def test_fails_at_once_when_retry_after_asks_for_more_than_it_waits(self):
+        self.urlopen.side_effect = [self._rate_limited(retry_after="3600")]
+
+        with self.assertRaises(SystemExit):
+            self._post_comment()
+
+        self.sleep.assert_not_called()
+        self.assertIn(
+            "Bitbucket asks to retry POST /pullrequests/42/comments in 3600 s",
+            self.stderr.getvalue(),
+        )
+
+    def test_reads_retry_after_as_seconds_or_an_http_date(self):
+        now = datetime(2026, 10, 26, 11, 0, tzinfo=timezone.utc).timestamp()
+        cases = [
+            ("45", 45),
+            (" 0 ", 0),
+            ("Mon, 26 Oct 2026 11:01:30 GMT", 90),
+            ("Mon, 26 Oct 2026 10:59:00 GMT", 0),
+            ("soon", None),
+            ("", None),
+            (None, None),
+        ]
+        for value, seconds in cases:
+            with self.subTest(value=value):
+                self.assertEqual(seconds, _retry_after_seconds(value, now))
 
 
 class ListPullRequestArgumentsTest(unittest.TestCase):
