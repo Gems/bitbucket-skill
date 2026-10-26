@@ -423,30 +423,51 @@ class MergePullRequestArgumentsTest(unittest.TestCase):
 class AddCommentArgumentsTest(unittest.TestCase):
     def test_takes_the_body_from_a_flag_a_file_or_one_quoted_argument(self):
         self.assertEqual(
-            ("42", "LGTM", None, None, False),
+            ("42", "LGTM", None, None, False, None, None),
             _parse_add_comment_args(["42", "--body", "LGTM"]),
         )
         path = _description_file(self, "## Finding\n\nDetails\n")
         self.assertEqual(
-            ("42", "## Finding\n\nDetails\n", None, None, False),
+            ("42", "## Finding\n\nDetails\n", None, None, False, None, None),
             _parse_add_comment_args(["42", "--body-file", path]),
         )
         self.assertEqual(
-            ("42", "ship it now", None, None, False),
+            ("42", "ship it now", None, None, False, None, None),
             _parse_add_comment_args(["42", "ship it now"]),
         )
         self.assertEqual(
-            ("42", "--- a rule", None, None, False),
+            ("42", "--- a rule", None, None, False, None, None),
             _parse_add_comment_args(["42", "--- a rule"]),
         )
 
     def test_parses_an_inline_pending_draft(self):
         self.assertEqual(
-            ("42", "Use DI", "src/Model.php", 45, True),
+            ("42", "Use DI", "src/Model.php", 45, True, None, None),
             _parse_add_comment_args([
                 "42", "--path", "src/Model.php", "--line", "45",
                 "--pending", "--body", "Use DI",
             ]),
+        )
+
+    def test_parses_an_old_side_and_a_file_anchor(self):
+        self.assertEqual(
+            ("42", "Why removed", "src/ATests.java", None, True, None, 120),
+            _parse_add_comment_args([
+                "42", "--path", "src/ATests.java", "--old-line", "120",
+                "--pending", "--body", "Why removed",
+            ]),
+        )
+        self.assertEqual(
+            ("42", "What changed", "src/ATests.java", None, True, None, None),
+            _parse_add_comment_args([
+                "42", "--path", "src/ATests.java", "--pending", "--body", "What changed",
+            ]),
+        )
+
+    def test_parses_a_reply(self):
+        self.assertEqual(
+            ("42", "Done", None, None, False, 886718944, None),
+            _parse_add_comment_args(["42", "--reply-to", "886718944", "--body", "Done"]),
         )
 
     def test_rejects_invalid_arguments(self):
@@ -467,11 +488,19 @@ class AddCommentArgumentsTest(unittest.TestCase):
             # option meant as prose, or prose meant as an option.
             ["42", "ship", "it", "now"],
             ["42", "---", "a", "rule"],
-            ["42", "--body", "x", "--path", "src/a.py"],
             ["42", "--body", "x", "--line", "3"],
+            ["42", "--body", "x", "--old-line", "3"],
+            ["42", "--body", "x", "--path", "src/a.py", "--old-line", "0"],
+            ["42", "--body", "x", "--path", "src/a.py", "--old-line"],
+            ["42", "--body", "x", "--path", "src/a.py", "--line", "3", "--old-line", "3"],
             ["42", "--body", "x", "--path", "src/a.py", "--line", "0"],
             ["42", "--body", "x", "--path", "src/a.py", "--line", "three"],
             ["42", "--body", "x", "--path"],
+            ["42", "--body", "x", "--reply-to"],
+            ["42", "--body", "x", "--reply-to", "abc"],
+            ["42", "--body", "x", "--reply-to", "0"],
+            ["42", "--body", "x", "--reply-to", "7", "--path", "src/a.py", "--line", "3"],
+            ["42", "--body", "x", "--reply-to", "7", "--path", "src/a.py"],
         ]
         for args in cases:
             with self.subTest(args=args):
@@ -613,6 +642,44 @@ class CommentCommandsTest(unittest.TestCase):
         self.assertIn(
             "Pending: true | Where: src/Validator.java:932", stdout.getvalue()
         )
+
+    @patch("bitbucket_api.api_request")
+    def test_add_comment_anchors_on_the_old_side_or_the_whole_file(self, api_request):
+        cases = [
+            ({"old_line": 120}, {"path": "src/ATests.java", "from": 120},
+             "Where: src/ATests.java:120 (old side)"),
+            ({}, {"path": "src/ATests.java"}, "Where: src/ATests.java (file)"),
+        ]
+        for kwargs, inline, where in cases:
+            with self.subTest(inline=inline):
+                api_request.reset_mock()
+                api_request.return_value = dict(self.DRAFT, inline=inline)
+                stdout = io.StringIO()
+
+                with redirect_stdout(stdout):
+                    cmd_add_comment(
+                        {}, "42", "Why", "src/ATests.java", pending=True, **kwargs
+                    )
+
+                self.assertEqual(
+                    {"content": {"raw": "Why"}, "inline": inline, "pending": True},
+                    api_request.call_args.kwargs["data"],
+                )
+                self.assertIn(where, stdout.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_add_comment_replies_in_the_parent_thread(self, api_request):
+        api_request.return_value = dict(self.PUBLISHED, parent={"id": 886718944})
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_add_comment({}, "42", "Done", reply_to=886718944)
+
+        self.assertEqual(
+            {"content": {"raw": "Done"}, "parent": {"id": 886718944}},
+            api_request.call_args.kwargs["data"],
+        )
+        self.assertIn("Reply to: 886718944", stdout.getvalue())
 
     @patch("bitbucket_api.api_request")
     def test_add_comment_without_pending_sends_no_pending_field(self, api_request):

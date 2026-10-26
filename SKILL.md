@@ -239,7 +239,8 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" comments 123 --pending-only
   `Pending: true|false | Author | Where | Created` line (plus `Reply to: <id>`
   for a reply), then its full untruncated text and an `<<<END>>>` line.
 - `Where` is `path:line` for an inline comment (`path:N (old side)` on a
-  removed line) and `general` otherwise.
+  removed line), `path (file)` for a comment on a whole file, and `general`
+  otherwise.
 - `--pending-only` keeps only pending comments: your own unsubmitted review
   drafts, which only their author can see.
 - `--json` prints the raw comment objects (after `--pending-only`, if given).
@@ -278,21 +279,30 @@ and **PR Description Formatting** below, then apply with `update-pr`:
 
 ### Add Comment to PR
 
-**Trigger**: `/bitbucket add-comment <ID> <text>`, "comment on line N of FILE", "leave a draft comment"
+**Trigger**: `/bitbucket add-comment <ID> <text>`, "comment on line N of FILE", "leave a draft comment", "reply to the PR comments"
 
 ```bash
 python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 --path src/Model.php --line 45 --pending --body-file /tmp/finding.md
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 --path src/OldTests.java --old-line 120 --pending --body-file /tmp/why-removed.md
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" add-comment 123 --reply-to 886718944 --body-file /tmp/answer.md
 ```
 
 - `--body TEXT` or `--body-file PATH` — the comment (markdown). Use a file for
   anything multi-line. A single quoted TEXT after the ID still works in place
   of `--body`; unquoted words are rejected rather than joined.
 - `--path FILE --line N` — anchor it inline on line N of the PR's new version
-  of FILE (both or neither).
+  of FILE.
+- `--path FILE --old-line N` — anchor it on line N of the PR's old version of
+  FILE: the place for a comment on a removed line, or on a file the PR deletes.
+- `--path FILE` alone — a comment on the file as a whole.
+- `--reply-to COMMENT_ID` — post it as a reply in that comment's thread (take
+  the id from `comments`). A reply takes its anchor from the parent, so it
+  cannot be combined with `--path`/`--line`/`--old-line`.
 - `--pending` — save it as a draft of your review, visible only to you until
   the review is submitted. Without it the comment is published at once.
-- Prints the new comment's id and its `Pending`/`Where` state; exits non-zero
-  if a `--pending` comment came back published.
+- Prints the new comment's id and its `Pending`/`Where` state, plus
+  `Reply to: <id>` for a reply; exits non-zero if a `--pending` comment came
+  back published.
 
 ### Edit a Comment
 
