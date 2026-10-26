@@ -132,9 +132,12 @@ def api_request(config, path, method="GET", data=None, allow_404=False):
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, context=SSL_CTX) as resp:
-                # A DELETE answers 204 with no body.
                 raw = resp.read()
-                return json.loads(raw) if raw else {}
+                # A DELETE answers 204 with no body. Any other empty body
+                # stays an error, so a re-read cannot pass for an empty object.
+                if not raw and method == "DELETE":
+                    return {}
+                return json.loads(raw)
         except urllib.error.HTTPError as e:
             if allow_404 and e.code == 404:
                 return None
@@ -962,7 +965,7 @@ def cmd_delete_comment(config, pr_id, comment_id, published=False):
     # Bitbucket removes a deleted draft outright and keeps a published comment
     # as `deleted`, so its thread stays readable.
     after = api_request(config, path, allow_404=True)
-    if after and not after.get("deleted"):
+    if after is not None and not after.get("deleted"):
         _fail(f"comment {comment_id} is still there after the delete")
     print(f"Deleted comment {comment_id} from PR #{pr_id}")
     print(f"Pending: {_comment_pending(comment)} | Where: {_comment_anchor(comment)}")

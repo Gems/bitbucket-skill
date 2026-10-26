@@ -243,7 +243,7 @@ class ApiRequestHeadersTest(unittest.TestCase):
         request = self._sent_request({"a": 1})
         self.assertEqual("application/json", request.get_header("Content-type"))
 
-    def test_an_empty_response_body_reads_as_an_empty_object(self):
+    def test_an_empty_delete_response_reads_as_an_empty_object(self):
         config = {"workspace": "ws", "repo_slug": "repo"}
         with patch("bitbucket_api._auth_header", return_value="Basic x"), \
                 patch("bitbucket_api.urllib.request.urlopen",
@@ -251,6 +251,14 @@ class ApiRequestHeadersTest(unittest.TestCase):
             self.assertEqual(
                 {}, api_request(config, "/pullrequests/1/comments/7", method="DELETE")
             )
+
+    def test_an_empty_get_response_is_an_error_not_an_empty_object(self):
+        config = {"workspace": "ws", "repo_slug": "repo"}
+        with patch("bitbucket_api._auth_header", return_value="Basic x"), \
+                patch("bitbucket_api.urllib.request.urlopen",
+                      return_value=io.BytesIO(b"")), \
+                self.assertRaises(ValueError):
+            api_request(config, "/pullrequests/1/comments/7")
 
 
 class ApiRequestRateLimitTest(unittest.TestCase):
@@ -881,6 +889,14 @@ class CommentCommandsTest(unittest.TestCase):
     @patch("bitbucket_api.api_request")
     def test_delete_comment_fails_when_the_comment_survives(self, api_request):
         api_request.side_effect = [self.DRAFT, {}, self.DRAFT]
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            cmd_delete_comment({}, "42", "886718944")
+
+    @patch("bitbucket_api.api_request")
+    def test_delete_comment_fails_when_the_re_read_proves_nothing(self, api_request):
+        api_request.side_effect = [self.DRAFT, {}, {}]
 
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit):
