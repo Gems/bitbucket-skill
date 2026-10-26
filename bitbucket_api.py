@@ -124,7 +124,9 @@ def api_request(config, path, method="GET", data=None, allow_404=False):
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, context=SSL_CTX) as resp:
-            return json.loads(resp.read())
+            # A DELETE answers 204 with no body.
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         if allow_404 and e.code == 404:
             return None
@@ -610,7 +612,8 @@ def cmd_decline_pr(config, pr_id):
 # side effect of reading, adding, or editing comments.
 
 def _comment_anchor(comment):
-    """Where a comment sits: `path:line` when inline, `general` otherwise."""
+    """Where a comment sits: `path:line` when inline, `path (file)` on a whole
+    file, `general` otherwise."""
     inline = comment.get("inline")
     if not inline:
         return "general"
@@ -619,7 +622,7 @@ def _comment_anchor(comment):
         return f"{path}:{inline['to']}"
     if inline.get("from") is not None:
         return f"{path}:{inline['from']} (old side)"
-    return path
+    return f"{path} (file)"
 
 
 def _comment_pending(comment):
@@ -691,7 +694,9 @@ def _parse_add_comment_args(args):
     text = None
     path = None
     line = None
+    old_line = None
     pending = False
+    reply_to = None
     index = 0
     while index < len(rest):
         arg = rest[index]
@@ -700,14 +705,24 @@ def _parse_add_comment_args(args):
                 "add-comment", rest, index, text is not None, COMMENT_BODY_FLAGS
             )
             index += 2
+        elif arg == "--reply-to":
+            reply_to = int(
+                _validate_comment_id(
+                    "add-comment --reply-to", _option_value(rest, index, "a comment id")
+                )
+            )
+            index += 2
         elif arg == "--path":
             path = _option_value(rest, index, "a file path")
             index += 2
-        elif arg == "--line":
+        elif arg in ("--line", "--old-line"):
             value = _option_value(rest, index, "a line number")
             if not value.isdigit() or int(value) < 1:
-                _fail(f"--line requires a positive line number, got {value!r}")
-            line = int(value)
+                _fail(f"{arg} requires a positive line number, got {value!r}")
+            if arg == "--line":
+                line = int(value)
+            else:
+                old_line = int(value)
             index += 2
         elif arg == "--pending":
             pending = True
@@ -729,24 +744,45 @@ def _parse_add_comment_args(args):
         _fail("add-comment requires --body TEXT or --body-file PATH")
     if not text.strip():
         _fail("add-comment requires non-empty comment text")
-    if (path is None) != (line is None):
-        _fail("an inline comment needs both --path and --line")
-    return pr_id, text, path, line, pending
+    if line is not None and old_line is not None:
+        # One comment sits on one side of the diff.
+        _fail("pass --line (new side) or --old-line (old side), not both")
+    if path is None and (line is not None or old_line is not None):
+        _fail("an inline comment needs --path with --line or --old-line")
+    if reply_to is not None and path is not None:
+        # A reply sits in its parent's thread, so it takes the parent's anchor.
+        _fail("a reply takes its place from the parent comment; drop --path/--line")
+    return pr_id, text, path, line, pending, reply_to, old_line
 
 
-def cmd_add_comment(config, pr_id, text, path=None, line=None, pending=False):
-    """Add a general or inline comment to a PR, as a pending draft when
-    `pending` is set."""
+def cmd_add_comment(
+    config, pr_id, text, path=None, line=None, pending=False, reply_to=None,
+    old_line=None,
+):
+    """Add a general, file or inline comment to a PR, or a reply to the comment
+    `reply_to`, as a pending draft when `pending` is set. An inline comment
+    sits on `line` of the new version or on `old_line` of the old one; with
+    neither, it sits on the file `path` as a whole."""
     payload = {"content": {"raw": text}}
     if path is not None:
-        payload["inline"] = {"path": path, "to": line}
+        payload["inline"] = {"path": path}
+        if line is not None:
+            payload["inline"]["to"] = line
+        if old_line is not None:
+            payload["inline"]["from"] = old_line
+    if reply_to is not None:
+        payload["parent"] = {"id": reply_to}
     if pending:
         payload["pending"] = True
     data = api_request(
         config, f"/pullrequests/{pr_id}/comments", method="POST", data=payload
     )
     print(f"Added comment {data.get('id', '—')} to PR #{pr_id}")
-    print(f"Pending: {_comment_pending(data)} | Where: {_comment_anchor(data)}")
+    details = f"Pending: {_comment_pending(data)} | Where: {_comment_anchor(data)}"
+    parent = (data.get("parent") or {}).get("id")
+    if parent:
+        details += f" | Reply to: {parent}"
+    print(details)
     if pending and not data.get("pending"):
         _fail(
             f"comment {data.get('id')} was sent as a draft, "
@@ -805,6 +841,43 @@ def cmd_edit_comment(config, pr_id, comment_id, text):
     changed = [label for label, old, new in checks if old != new]
     if changed:
         _fail(f"editing comment {comment_id} changed its {' and '.join(changed)}")
+
+
+def _parse_delete_comment_args(args):
+    pr_id, rest = _leading_positional("delete-comment", args, "PR ID")
+    _validate_pr_id("delete-comment", pr_id)
+    comment_id, rest = _leading_positional("delete-comment", rest, "COMMENT_ID")
+    _validate_comment_id("delete-comment", comment_id)
+    published = False
+    for arg in rest:
+        if arg == "--published":
+            published = True
+        elif _looks_like_option(arg):
+            _fail(f"unknown delete-comment option: {arg}")
+        else:
+            _fail(f"unexpected delete-comment argument: {arg!r}")
+    return pr_id, comment_id, published
+
+
+def cmd_delete_comment(config, pr_id, comment_id, published=False):
+    """Delete a comment, then re-read it to show it is gone. A pending draft
+    is its author's alone; a published comment is part of the PR's
+    conversation, so deleting one takes `published`."""
+    path = f"/pullrequests/{pr_id}/comments/{comment_id}"
+    comment = api_request(config, path)
+    if not comment.get("pending") and not published:
+        _fail(
+            f"comment {comment_id} is published; "
+            "pass --published to delete it from the PR's conversation"
+        )
+    api_request(config, path, method="DELETE")
+    # Bitbucket removes a deleted draft outright and keeps a published comment
+    # as `deleted`, so its thread stays readable.
+    after = api_request(config, path, allow_404=True)
+    if after and not after.get("deleted"):
+        _fail(f"comment {comment_id} is still there after the delete")
+    print(f"Deleted comment {comment_id} from PR #{pr_id}")
+    print(f"Pending: {_comment_pending(comment)} | Where: {_comment_anchor(comment)}")
 
 
 # Bitbucket caps a page at 100 results, and the pipeline listing is not
@@ -1283,10 +1356,14 @@ Commands:
                                      List PR comments with full text, anchor and
                                      pending state (alias: pr-comments)
   add-comment <ID> (--body TEXT | --body-file PATH)
-              [--path FILE --line N] [--pending]
-                                     Add a general or inline comment (--pending: a draft)
+              [--path FILE [--line N | --old-line N] | --reply-to COMMENT_ID]
+              [--pending]            Add a general, file or inline comment, or a
+                                     reply (--old-line: on the old side;
+                                     --pending: a draft)
   edit-comment <ID> <COMMENT_ID> (--body TEXT | --body-file PATH)
                                      Replace a comment's text, keeping it pending/inline
+  delete-comment <ID> <COMMENT_ID> [--published]
+                                     Delete a draft (--published: a published comment)
   pipelines [COUNT]                  List recent pipelines
   pipeline <PIPELINE_ID>             Show one run (build number or uuid) with its steps
   run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]
@@ -1302,8 +1379,8 @@ or a full/short pipeline uuid."""
 COMMANDS = (
     "create-pr", "list-prs", "get-pr", "pr-commits", "update-pr", "merge-pr",
     "approve-pr", "decline-pr", "comments", "pr-comments", "add-comment",
-    "edit-comment", "pipelines", "pipeline", "run-pipeline", "pipeline-steps",
-    "pipeline-log",
+    "edit-comment", "delete-comment", "pipelines", "pipeline", "run-pipeline",
+    "pipeline-steps", "pipeline-log",
 )
 
 
@@ -1361,12 +1438,14 @@ def main():
         cmd_comments(config, pr_id, pending_only, as_json)
 
     elif cmd == "add-comment":
-        pr_id, text, path, line, pending = _parse_add_comment_args(args)
-        cmd_add_comment(config, pr_id, text, path, line, pending)
+        cmd_add_comment(config, *_parse_add_comment_args(args))
 
     elif cmd == "edit-comment":
         pr_id, comment_id, text = _parse_edit_comment_args(args)
         cmd_edit_comment(config, pr_id, comment_id, text)
+
+    elif cmd == "delete-comment":
+        cmd_delete_comment(config, *_parse_delete_comment_args(args))
 
     elif cmd == "pipelines":
         cmd_pipelines(config, _parse_pipelines_args(args))

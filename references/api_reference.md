@@ -97,6 +97,12 @@ curl -X POST -u "$USER:$PASS" \
 Add `"pending": true` to either payload to save the comment as a draft of
 your review instead of publishing it.
 
+In `inline`, `"to"` is a line of the new version and `"from"` a line of the
+old one (a removed line, or a file the PR deletes); with neither, the comment
+sits on the file as a whole. To reply in a thread, send
+`"parent": {"id": <comment_id>}` instead of `inline`: a reply takes its
+parent's anchor.
+
 ### List Comments
 ```bash
 curl -u "$USER:$PASS" \
@@ -118,6 +124,15 @@ Sending only `content` leaves the pending state and inline anchor unchanged.
 returns 400 `"extra keys not allowed"` and changes nothing, even when it
 repeats the current anchor. To move a comment to another line or file, delete
 it and create it again; a PUT cannot publish a draft either.
+
+### Delete Comment
+```bash
+curl -X DELETE -u "$USER:$PASS" \
+  "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_id}/comments/{comment_id}"
+```
+
+Answers 204 with no body. A deleted draft is removed outright, while
+a published comment stays in its thread with `"deleted": true`.
 
 ## Pipelines API
 

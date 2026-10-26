@@ -22,6 +22,7 @@ from bitbucket_api import (
     _parse_add_comment_args,
     _parse_comments_args,
     _parse_create_pr_args,
+    _parse_delete_comment_args,
     _parse_edit_comment_args,
     _parse_get_pr_args,
     _parse_list_prs_args,
@@ -39,6 +40,7 @@ from bitbucket_api import (
     cmd_add_comment,
     cmd_approve_pr,
     cmd_comments,
+    cmd_delete_comment,
     cmd_edit_comment,
     cmd_get_pr,
     cmd_list_prs,
@@ -238,6 +240,15 @@ class ApiRequestHeadersTest(unittest.TestCase):
         request = self._sent_request({"a": 1})
         self.assertEqual("application/json", request.get_header("Content-type"))
 
+    def test_an_empty_response_body_reads_as_an_empty_object(self):
+        config = {"workspace": "ws", "repo_slug": "repo"}
+        with patch("bitbucket_api._auth_header", return_value="Basic x"), \
+                patch("bitbucket_api.urllib.request.urlopen",
+                      return_value=io.BytesIO(b"")):
+            self.assertEqual(
+                {}, api_request(config, "/pullrequests/1/comments/7", method="DELETE")
+            )
+
 
 class ListPullRequestArgumentsTest(unittest.TestCase):
     def test_parses_state_and_source_filters(self):
@@ -423,30 +434,51 @@ class MergePullRequestArgumentsTest(unittest.TestCase):
 class AddCommentArgumentsTest(unittest.TestCase):
     def test_takes_the_body_from_a_flag_a_file_or_one_quoted_argument(self):
         self.assertEqual(
-            ("42", "LGTM", None, None, False),
+            ("42", "LGTM", None, None, False, None, None),
             _parse_add_comment_args(["42", "--body", "LGTM"]),
         )
         path = _description_file(self, "## Finding\n\nDetails\n")
         self.assertEqual(
-            ("42", "## Finding\n\nDetails\n", None, None, False),
+            ("42", "## Finding\n\nDetails\n", None, None, False, None, None),
             _parse_add_comment_args(["42", "--body-file", path]),
         )
         self.assertEqual(
-            ("42", "ship it now", None, None, False),
+            ("42", "ship it now", None, None, False, None, None),
             _parse_add_comment_args(["42", "ship it now"]),
         )
         self.assertEqual(
-            ("42", "--- a rule", None, None, False),
+            ("42", "--- a rule", None, None, False, None, None),
             _parse_add_comment_args(["42", "--- a rule"]),
         )
 
     def test_parses_an_inline_pending_draft(self):
         self.assertEqual(
-            ("42", "Use DI", "src/Model.php", 45, True),
+            ("42", "Use DI", "src/Model.php", 45, True, None, None),
             _parse_add_comment_args([
                 "42", "--path", "src/Model.php", "--line", "45",
                 "--pending", "--body", "Use DI",
             ]),
+        )
+
+    def test_parses_an_old_side_and_a_file_anchor(self):
+        self.assertEqual(
+            ("42", "Why removed", "src/ATests.java", None, True, None, 120),
+            _parse_add_comment_args([
+                "42", "--path", "src/ATests.java", "--old-line", "120",
+                "--pending", "--body", "Why removed",
+            ]),
+        )
+        self.assertEqual(
+            ("42", "What changed", "src/ATests.java", None, True, None, None),
+            _parse_add_comment_args([
+                "42", "--path", "src/ATests.java", "--pending", "--body", "What changed",
+            ]),
+        )
+
+    def test_parses_a_reply(self):
+        self.assertEqual(
+            ("42", "Done", None, None, False, 886718944, None),
+            _parse_add_comment_args(["42", "--reply-to", "886718944", "--body", "Done"]),
         )
 
     def test_rejects_invalid_arguments(self):
@@ -467,11 +499,19 @@ class AddCommentArgumentsTest(unittest.TestCase):
             # option meant as prose, or prose meant as an option.
             ["42", "ship", "it", "now"],
             ["42", "---", "a", "rule"],
-            ["42", "--body", "x", "--path", "src/a.py"],
             ["42", "--body", "x", "--line", "3"],
+            ["42", "--body", "x", "--old-line", "3"],
+            ["42", "--body", "x", "--path", "src/a.py", "--old-line", "0"],
+            ["42", "--body", "x", "--path", "src/a.py", "--old-line"],
+            ["42", "--body", "x", "--path", "src/a.py", "--line", "3", "--old-line", "3"],
             ["42", "--body", "x", "--path", "src/a.py", "--line", "0"],
             ["42", "--body", "x", "--path", "src/a.py", "--line", "three"],
             ["42", "--body", "x", "--path"],
+            ["42", "--body", "x", "--reply-to"],
+            ["42", "--body", "x", "--reply-to", "abc"],
+            ["42", "--body", "x", "--reply-to", "0"],
+            ["42", "--body", "x", "--reply-to", "7", "--path", "src/a.py", "--line", "3"],
+            ["42", "--body", "x", "--reply-to", "7", "--path", "src/a.py"],
         ]
         for args in cases:
             with self.subTest(args=args):
@@ -510,6 +550,28 @@ class EditCommentArgumentsTest(unittest.TestCase):
             with self.subTest(args=args):
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     _parse_edit_comment_args(args)
+
+
+class DeleteCommentArgumentsTest(unittest.TestCase):
+    def test_takes_the_comment_and_an_explicit_published_flag(self):
+        self.assertEqual(("42", "7", False), _parse_delete_comment_args(["42", "7"]))
+        self.assertEqual(
+            ("42", "7", True), _parse_delete_comment_args(["42", "7", "--published"])
+        )
+
+    def test_rejects_invalid_arguments(self):
+        cases = [
+            [],
+            ["42"],
+            ["42", "abc"],
+            ["42", "0"],
+            ["42", "7", "8"],
+            ["42", "7", "--pending"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    _parse_delete_comment_args(args)
 
 
 class CommentsArgumentsTest(unittest.TestCase):
@@ -615,6 +677,44 @@ class CommentCommandsTest(unittest.TestCase):
         )
 
     @patch("bitbucket_api.api_request")
+    def test_add_comment_anchors_on_the_old_side_or_the_whole_file(self, api_request):
+        cases = [
+            ({"old_line": 120}, {"path": "src/ATests.java", "from": 120},
+             "Where: src/ATests.java:120 (old side)"),
+            ({}, {"path": "src/ATests.java"}, "Where: src/ATests.java (file)"),
+        ]
+        for kwargs, inline, where in cases:
+            with self.subTest(inline=inline):
+                api_request.reset_mock()
+                api_request.return_value = dict(self.DRAFT, inline=inline)
+                stdout = io.StringIO()
+
+                with redirect_stdout(stdout):
+                    cmd_add_comment(
+                        {}, "42", "Why", "src/ATests.java", pending=True, **kwargs
+                    )
+
+                self.assertEqual(
+                    {"content": {"raw": "Why"}, "inline": inline, "pending": True},
+                    api_request.call_args.kwargs["data"],
+                )
+                self.assertIn(where, stdout.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_add_comment_replies_in_the_parent_thread(self, api_request):
+        api_request.return_value = dict(self.PUBLISHED, parent={"id": 886718944})
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_add_comment({}, "42", "Done", reply_to=886718944)
+
+        self.assertEqual(
+            {"content": {"raw": "Done"}, "parent": {"id": 886718944}},
+            api_request.call_args.kwargs["data"],
+        )
+        self.assertIn("Reply to: 886718944", stdout.getvalue())
+
+    @patch("bitbucket_api.api_request")
     def test_add_comment_without_pending_sends_no_pending_field(self, api_request):
         api_request.return_value = self.PUBLISHED
 
@@ -636,6 +736,52 @@ class CommentCommandsTest(unittest.TestCase):
             cmd_add_comment({}, "42", "Use DI", pending=True)
 
         self.assertIn("Bitbucket published it", stderr.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_delete_comment_removes_a_draft_and_confirms_it_is_gone(self, api_request):
+        api_request.side_effect = [self.DRAFT, {}, None]
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            cmd_delete_comment({}, "42", "886718944")
+
+        path = "/pullrequests/42/comments/886718944"
+        self.assertEqual(
+            [((({}, path)), {}), (({}, path), {"method": "DELETE"}),
+             (({}, path), {"allow_404": True})],
+            [(c.args, c.kwargs) for c in api_request.call_args_list],
+        )
+        self.assertIn("Deleted comment 886718944 from PR #42", stdout.getvalue())
+        self.assertIn("Pending: true | Where: src/Validator.java:932", stdout.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_delete_comment_refuses_a_published_comment_unless_told(self, api_request):
+        api_request.return_value = self.PUBLISHED
+        stderr = io.StringIO()
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(stderr), \
+                self.assertRaises(SystemExit):
+            cmd_delete_comment({}, "42", "886718700")
+
+        self.assertEqual(1, api_request.call_count)
+        self.assertIn("--published", stderr.getvalue())
+
+    @patch("bitbucket_api.api_request")
+    def test_delete_comment_takes_a_published_comment_with_the_flag(self, api_request):
+        api_request.side_effect = [self.PUBLISHED, {}, dict(self.PUBLISHED, deleted=True)]
+
+        with redirect_stdout(io.StringIO()):
+            cmd_delete_comment({}, "42", "886718700", published=True)
+
+        self.assertEqual("DELETE", api_request.call_args_list[1].kwargs["method"])
+
+    @patch("bitbucket_api.api_request")
+    def test_delete_comment_fails_when_the_comment_survives(self, api_request):
+        api_request.side_effect = [self.DRAFT, {}, self.DRAFT]
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            cmd_delete_comment({}, "42", "886718944")
 
     @patch("bitbucket_api.api_request")
     def test_edit_comment_sends_only_the_text_and_confirms_it_stayed_pending(
