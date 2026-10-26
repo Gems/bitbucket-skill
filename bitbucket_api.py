@@ -132,7 +132,12 @@ def api_request(config, path, method="GET", data=None, allow_404=False):
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, context=SSL_CTX) as resp:
-                return json.loads(resp.read())
+                raw = resp.read()
+                # A DELETE answers 204 with no body. Any other empty body
+                # stays an error, so a re-read cannot pass for an empty object.
+                if not raw and method == "DELETE":
+                    return {}
+                return json.loads(raw)
         except urllib.error.HTTPError as e:
             if allow_404 and e.code == 404:
                 return None
@@ -929,6 +934,43 @@ def cmd_edit_comment(config, pr_id, comment_id, text):
         _fail(f"editing comment {comment_id} changed its {' and '.join(changed)}")
 
 
+def _parse_delete_comment_args(args):
+    pr_id, rest = _leading_positional("delete-comment", args, "PR ID")
+    _validate_pr_id("delete-comment", pr_id)
+    comment_id, rest = _leading_positional("delete-comment", rest, "COMMENT_ID")
+    _validate_comment_id("delete-comment", comment_id)
+    published = False
+    for arg in rest:
+        if arg == "--published":
+            published = True
+        elif _looks_like_option(arg):
+            _fail(f"unknown delete-comment option: {arg}")
+        else:
+            _fail(f"unexpected delete-comment argument: {arg!r}")
+    return pr_id, comment_id, published
+
+
+def cmd_delete_comment(config, pr_id, comment_id, published=False):
+    """Delete a comment, then re-read it to show it is gone. A pending draft
+    is its author's alone; a published comment is part of the PR's
+    conversation, so deleting one takes `published`."""
+    path = f"/pullrequests/{pr_id}/comments/{comment_id}"
+    comment = api_request(config, path)
+    if not comment.get("pending") and not published:
+        _fail(
+            f"comment {comment_id} is published; "
+            "pass --published to delete it from the PR's conversation"
+        )
+    api_request(config, path, method="DELETE")
+    # Bitbucket removes a deleted draft outright and keeps a published comment
+    # as `deleted`, so its thread stays readable.
+    after = api_request(config, path, allow_404=True)
+    if after is not None and not after.get("deleted"):
+        _fail(f"comment {comment_id} is still there after the delete")
+    print(f"Deleted comment {comment_id} from PR #{pr_id}")
+    print(f"Pending: {_comment_pending(comment)} | Where: {_comment_anchor(comment)}")
+
+
 # Bitbucket caps a page at 100 results, and the pipeline listing is not
 # paginated - a larger COUNT would silently return 100 rows, so reject it up
 # front. The same cap bounds how far back an id lookup can search.
@@ -1411,6 +1453,8 @@ Commands:
                                      --pending: a draft)
   edit-comment <ID> <COMMENT_ID> (--body TEXT | --body-file PATH)
                                      Replace a comment's text, keeping it pending/inline
+  delete-comment <ID> <COMMENT_ID> [--published]
+                                     Delete a draft (--published: a published comment)
   pipelines [COUNT]                  List recent pipelines
   pipeline <PIPELINE_ID>             Show one run (build number or uuid) with its steps
   run-pipeline [--branch BRANCH] [--custom PATTERN] [--variable KEY=VALUE]
@@ -1426,8 +1470,8 @@ or a full/short pipeline uuid."""
 COMMANDS = (
     "create-pr", "list-prs", "get-pr", "pr-commits", "update-pr", "merge-pr",
     "approve-pr", "decline-pr", "comments", "pr-comments", "add-comment",
-    "edit-comment", "pipelines", "pipeline", "run-pipeline", "pipeline-steps",
-    "pipeline-log",
+    "edit-comment", "delete-comment", "pipelines", "pipeline", "run-pipeline",
+    "pipeline-steps", "pipeline-log",
 )
 
 
@@ -1490,6 +1534,9 @@ def main():
     elif cmd == "edit-comment":
         pr_id, comment_id, text = _parse_edit_comment_args(args)
         cmd_edit_comment(config, pr_id, comment_id, text)
+
+    elif cmd == "delete-comment":
+        cmd_delete_comment(config, *_parse_delete_comment_args(args))
 
     elif cmd == "pipelines":
         cmd_pipelines(config, _parse_pipelines_args(args))

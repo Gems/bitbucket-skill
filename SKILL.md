@@ -2,9 +2,9 @@
 name: bitbucket
 description: >
   Interact with Bitbucket — create PRs, list PRs, view PR details, update a PR's title/description, approve, merge,
-  decline, read, add and edit PR comments (pending review drafts included), view and trigger pipelines, CI-gated merge
+  decline, read, add, edit and delete PR comments (pending review drafts included), view and trigger pipelines, CI-gated merge
   (poll the PR pipeline and merge when green), code review with inline comments, manage environments and variables.
-  Use when user says "/bitbucket pr", "/bitbucket comments", "/bitbucket edit-comment", "edit my draft comment",
+  Use when user says "/bitbucket pr", "/bitbucket comments", "/bitbucket edit-comment", "edit my draft comment", "/bitbucket delete-comment",
   "/bitbucket create-pr", "/bitbucket list-prs", "/bitbucket approve-pr", "approve PR", "/bitbucket pipelines",
   "/bitbucket run-pipeline", "run the pipeline", "trigger a build", "/bitbucket pipeline 1333", asks what happened in a
   build / pipeline named by its number ("check build #1333"), "/bitbucket merge-when-green", "/bitbucket ship",
@@ -324,6 +324,22 @@ python3 "$BITBUCKET_SKILL/bitbucket_api.py" edit-comment 123 886718944 --body-fi
   its anchor. The command re-reads the comment and prints
   `Pending: true (unchanged) | Where: path:line (unchanged)`; it exits non-zero
   and marks the field `(CHANGED)` if either moved.
+
+### Delete a Comment
+
+**Trigger**: `/bitbucket delete-comment <ID> <COMMENT_ID>`, "delete my draft comment", "remove those draft comments"
+
+```bash
+python3 "$BITBUCKET_SKILL/bitbucket_api.py" delete-comment 123 886718944
+```
+
+- Take the id from `comments`. A pending draft is deleted outright: only its
+  author ever saw it.
+- A published comment is part of the PR's conversation, so the command refuses
+  it unless `--published` is passed. Bitbucket keeps it in the thread marked
+  deleted. Delete a published comment only when the user asks for that one.
+- The command re-reads the comment after the delete and exits non-zero if it is
+  still there. It prints the deleted comment's `Pending`/`Where` state.
 
 ### Pending comments are the user's to publish
 
