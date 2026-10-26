@@ -677,7 +677,8 @@ For dozens of comments, replies or edits in one go:
   B="$BITBUCKET_SKILL/bitbucket_api.py"
   python3 "$B" comments 542 --json > /tmp/existing.json
   # Write /tmp/todo.tsv (file<TAB>line<TAB>body-file) from the plan, minus what existing.json already has.
-  while IFS=$'\t' read -r file line body; do
+  # `|| [ -n "$file" ]` keeps a last row that has no trailing newline.
+  while IFS=$'\t' read -r file line body || [ -n "$file" ]; do
     python3 "$B" add-comment 542 --pending --path "$file" --line "$line" --body-file "$body"
     sleep 3
   done < /tmp/todo.tsv
